@@ -12,7 +12,7 @@ from langgraph.graph import END, START, StateGraph
 
 from config import AppSettings, DevicePolicy, EnvironmentalSource, QualityLevel, get_settings
 from memory import IncidentMemory, MemoryStore
-from nokia_clients import BaseNokiaClient, CongestionReading, DeviceStatus
+from nokia_clients import BaseNokiaClient, CongestionReading, DeviceStatus, evaluate_trusted_dispatch_phone
 from playbooks import Action, PlaybookEngine
 from prediction import PredictionResult, RiskForecaster
 
@@ -82,6 +82,9 @@ class HarisState(TypedDict, total=False):
     verification: Dict[str, Any]
     learning: Dict[str, Any]
     trace: List[str]
+    events: List[Dict[str, Any]]
+    active_playbook: Dict[str, Any]
+    field_intervention_phone: Optional[str]
     error: Optional[str]
     pre_execution_congestion: Dict[str, Dict[str, Any]]
     pre_execution_devices: Dict[str, str]
@@ -499,6 +502,14 @@ class HarisAgentSystem:
 
     def _trace(self, state: HarisState, message: str) -> None:
         state.setdefault("trace", []).append(f"{time.strftime('%H:%M:%S')} | {message}")
+        stage = message.split(":", 1)[0].strip().upper()
+        event_type = {
+            "SENTINEL": "SENSE", "CARTOGRAPHER": "REASON", "TRIAGE": "ACTION_PROPOSED",
+            "WARDEN": "WARDEN_APPROVED" if "approved" in message else "WARDEN_BLOCKED",
+            "ACTUATOR": "ACTION_EXECUTED" if "executed" in message else "ACTION_FAILED",
+            "VERIFY": "VERIFY", "ROLLBACK": "ROLLBACK", "LEARN": "LEARN",
+        }.get(stage, stage)
+        state.setdefault("events", []).append({"timestamp": time.time(), "incident_id": state.get("incident", {}).get("incident_id"), "type": event_type, "agent": stage, "message": message, "status": "BLOCKED" if "blocked" in message or "rejected" in message else "OK", "metadata": {}})
 
 
     async def _warden(self, state: HarisState) -> HarisState:
@@ -582,6 +593,16 @@ class HarisAgentSystem:
             }
 
             safe = all(checks.values())
+
+            # Only privileged field intervention triggers identity trust; routine
+            # autonomous network remediation never invokes it.
+            if state.get("field_intervention_phone"):
+                trust = await evaluate_trusted_dispatch_phone(state["field_intervention_phone"], self.settings)
+                state["trusted_dispatch"] = trust
+                self._trace(state, f"TRUST_CHECK: decision={trust['decision']}")
+                if trust["decision"] != "ALLOW":
+                    safe = False
+                    checks["trusted_dispatch_ok"] = False
 
             state["warden"] = {
                 "verified": safe,
@@ -860,6 +881,15 @@ class HarisAgentSystem:
             devices,
         )
         all_actions: List[Action] = evaluation["actions"]
+        state["active_playbook"] = {
+            "name": ", ".join(evaluation["playbooks"]) or "None",
+            "state": "ACTIVE" if all_actions else "IDLE",
+            "trigger_reason": "Dust/congestion/battery policy evidence",
+            "affected_devices": incident.affected_devices,
+            "current_stage": "TRIAGE",
+            "latest_outcome": "proposed" if all_actions else "no_action_proposed",
+        }
+        self._trace(state, f"PLAYBOOK_TRIGGERED: {state['active_playbook']['name']}")
         prior_incidents = await self.memory.search_incidents(
             "sandstorm " + " ".join(incident.affected_cells), limit=3
         )
@@ -2102,6 +2132,7 @@ class HarisAgentSystem:
             "cycle_id": uuid.uuid4().hex[:10],
             "dust_advisory": dust_advisory,
             "trace": [],
+            "events": [],
         }
 
         result = await self.graph.ainvoke(initial)

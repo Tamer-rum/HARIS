@@ -16,3 +16,6 @@
 | Public repository/demo URL | ROADMAP | Deployment configuration is included; hosting remains an external step. |
 | Retry, timeout, fallback | PARTIAL | Nokia adapter has bounded retry and fixture fallback; dust feed has timeout/fallback. No circuit-breaker claim is made. |
 | Geofence callback | IMPLEMENTED | Validated receipt endpoint records only accepted event type; public hosting is an external dependency. |
+| Number Verification | SIMULATOR_VERIFIED | Nokia Fast OAuth, HARIS callback, and server-held verified identity receipt completed end-to-end. |
+| SIM Swap | SIMULATOR_VERIFIED | Nokia SIM Swap check completed end-to-end and returned a real boolean. |
+| Trusted Dispatch / WARDEN trust gate | SIMULATOR_VERIFIED | Server-held Number Verification plus Nokia SIM Swap correctly fail-closed with `BLOCK` on a recent SIM swap. |

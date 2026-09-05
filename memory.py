@@ -32,6 +32,8 @@ class IncidentMemory(BaseModel):
     cycle_id: Optional[str] = None
     mode: Optional[str] = None
     audit: Dict[str, Any] = Field(default_factory=dict)
+    previous_hash: Optional[str] = None
+    record_hash: Optional[str] = None
 
     verification: Dict[str, Any] = Field(default_factory=dict)
     rollback: Dict[str, Any] = Field(default_factory=dict)
@@ -86,6 +88,14 @@ class MemoryStore:
         self.local_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     async def remember_incident(self, incident: IncidentMemory) -> None:
+        # Hash chain makes local append-only history tamper-evident, not immutable.
+        previous = self._incidents[-1].record_hash if self._incidents else None
+        payload = incident.model_dump(exclude={"previous_hash", "record_hash"})
+        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+        incident = incident.model_copy(update={
+            "previous_hash": previous,
+            "record_hash": hashlib.sha256((canonical + (previous or "")).encode("utf-8")).hexdigest(),
+        })
         self._incidents.append(incident)
         self._save_local()
         if self.supabase:
@@ -169,3 +179,16 @@ class MemoryStore:
     def get_incident(self, cycle_or_incident_id: str) -> Optional[IncidentMemory]:
         return next((item for item in reversed(self._incidents)
                      if item.cycle_id == cycle_or_incident_id or item.incident_id == cycle_or_incident_id), None)
+
+    def verify_audit_chain(self) -> Dict[str, Any]:
+        previous = None
+        for index, record in enumerate(self._incidents):
+            if not record.record_hash:  # legacy records are view-compatible, not chain-verifiable
+                return {"valid": False, "reason": "legacy_record_without_hash", "index": index}
+            payload = record.model_dump(exclude={"previous_hash", "record_hash"})
+            canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+            expected = hashlib.sha256((canonical + (previous or "")).encode("utf-8")).hexdigest()
+            if record.previous_hash != previous or record.record_hash != expected:
+                return {"valid": False, "reason": "hash_mismatch", "index": index}
+            previous = record.record_hash
+        return {"valid": True, "records": len(self._incidents)}

@@ -1187,18 +1187,17 @@ async def number_verification_callback(code: str, state: str) -> Dict[str, str]:
     }
 
 
-@router.post("/trusted-dispatch/evaluate")
-async def trusted_dispatch(request: TrustedDispatchRequest) -> Dict[str, Any]:
+async def evaluate_trusted_dispatch_phone(phone_number: str, settings: Optional[AppSettings] = None) -> Dict[str, Any]:
     """Sensitive dispatch trust gate; independent from fixture network client."""
-    settings = get_settings()
-    if not verified_identities.is_fresh(request.phone_number, settings.trusted_dispatch_verification_ttl_seconds):
+    settings = settings or get_settings()
+    if not verified_identities.is_fresh(phone_number, settings.trusted_dispatch_verification_ttl_seconds):
         return {"decision": "BLOCK", "number_verified": False, "recent_sim_swap": None, "reason": "Fresh server-side Number Verification is required."}
     if not settings.nac_api_token:
         return {"decision": "BLOCK", "number_verified": True, "recent_sim_swap": None, "reason": "SIM Swap verification unavailable."}
     try:
         import network_as_code as nac
         identity_client = nac.NetworkAsCodeClient(token=settings.nac_api_token.get_secret_value())
-        device = identity_client.devices.get(phone_number=request.phone_number)
+        device = identity_client.devices.get(phone_number=phone_number)
         # Public SDK wrapper around client._api.sim_swap.verify_sim_swap,
         # which POSTs /check with maxAge expressed in hours.
         recent = bool(device.verify_sim_swap(settings.trusted_dispatch_sim_swap_max_age_hours))
@@ -1208,6 +1207,11 @@ async def trusted_dispatch(request: TrustedDispatchRequest) -> Dict[str, Any]:
     if recent:
         return {"decision": "BLOCK", "number_verified": True, "recent_sim_swap": True, "reason": "Recent SIM swap detected."}
     return {"decision": "ALLOW", "number_verified": True, "recent_sim_swap": False, "reason": "Number Verification passed and no recent SIM swap was detected."}
+
+
+@router.post("/trusted-dispatch/evaluate")
+async def trusted_dispatch(request: TrustedDispatchRequest) -> Dict[str, Any]:
+    return await evaluate_trusted_dispatch_phone(request.phone_number)
 
 
 @router.post("/device-status", response_model=ApiResponse[List[DeviceStatus]])

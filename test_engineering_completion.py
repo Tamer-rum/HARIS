@@ -109,6 +109,26 @@ class EngineeringCompletionTests(unittest.TestCase):
         self.assertIsNone(view["prediction"])
         self.assertNotIn("audit", raw)
 
+    def test_audit_hash_chain_detects_tampering(self):
+        settings = AppSettings(nac_mode="fixture", fixture_dir="fixtures", gemini_api_key=None, groq_api_key=None)
+        store = MemoryStore(settings)
+        store._incidents = []
+        async def add(identifier):
+            await store.remember_incident(IncidentMemory(incident_id=identifier, summary=identifier, storm_type="sandstorm", peak_congestion_level="High", peak_confidence_level=90, affected_cells=["T03"], affected_devices=[], actions=[], executed_actions=[], outcome="verified"))
+        asyncio.run(add("one")); asyncio.run(add("two"))
+        self.assertTrue(store.verify_audit_chain()["valid"])
+        store._incidents[0].summary = "tampered"
+        self.assertFalse(store.verify_audit_chain()["valid"])
+
+    def test_streamlit_system_memory_accepts_empty_and_legacy_audit_chain(self):
+        settings = AppSettings(nac_mode="fixture", fixture_dir="fixtures", gemini_api_key=None, groq_api_key=None)
+        # Same HarisAgentSystem/MemoryStore construction used by app.get_system().
+        system = HarisAgentSystem(FixtureNokiaClient(settings), settings=settings)
+        system.memory._incidents = []
+        self.assertEqual(system.memory.verify_audit_chain(), {"valid": True, "records": 0})
+        system.memory._incidents = [IncidentMemory(incident_id="legacy", summary="legacy", storm_type="sandstorm", peak_congestion_level="High", peak_confidence_level=1, affected_cells=[], affected_devices=[], actions=[], executed_actions=[], outcome="verified")]
+        self.assertEqual(system.memory.verify_audit_chain()["reason"], "legacy_record_without_hash")
+
     def test_reasoning_router_mocked_success_malformed_and_failure_fallback(self):
         settings = AppSettings(nac_mode="fixture", fixture_dir="fixtures", gemini_api_key=None, groq_api_key=None)
         router = ReasoningRouter(settings)
