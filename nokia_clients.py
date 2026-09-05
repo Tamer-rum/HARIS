@@ -1039,24 +1039,33 @@ async def congestion(cell_ids: Optional[List[str]] = None):
 
 @router.get("/auth/number-verification/callback")
 async def number_verification_callback(code: str, state: str) -> Dict[str, str]:
-    """Receive Nokia Number Verification OAuth redirect safely."""
+    """Complete Nokia Number Verification OAuth callback."""
     if not code.strip() or not state.strip():
         raise HTTPException(
             status_code=400,
             detail="Missing OAuth authorization code or state.",
         )
 
-    # Never log or return the authorization code itself.
+    try:
+        device = client.devices.get(phone_number="+99999991000")
+        verified = device.verify_number(code=code, state=state)
+    except Exception as exc:
+        logger.exception("Nokia Number Verification failed.")
+        raise HTTPException(
+            status_code=502,
+            detail="Number Verification request failed.",
+        ) from exc
+
     logger.info(
-        "Received Nokia Number Verification OAuth callback; state_present=%s",
-        bool(state),
+        "Completed Nokia Number Verification; verified=%s",
+        verified,
     )
 
     return {
-        "status": "authorization_received",
-        "code_received": "true",
-        "state_received": "true",
+        "status": "verified" if verified else "not_verified",
+        "phone_number_verified": str(bool(verified)).lower(),
     }
+
 
 @router.post("/device-status", response_model=ApiResponse[List[DeviceStatus]])
 async def device_status(device_ids: List[str]):
