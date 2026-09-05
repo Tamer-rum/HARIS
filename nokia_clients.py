@@ -1037,6 +1037,26 @@ async def congestion(cell_ids: Optional[List[str]] = None):
     data, latency = await _wrap(lambda: client.congestion_insights(cell_ids))
     return ApiResponse(data=data, source=client.name, latency_ms=latency)
 
+@router.get("/auth/number-verification/callback")
+async def number_verification_callback(code: str, state: str) -> Dict[str, str]:
+    """Receive Nokia Number Verification OAuth redirect safely."""
+    if not code.strip() or not state.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Missing OAuth authorization code or state.",
+        )
+
+    # Never log or return the authorization code itself.
+    logger.info(
+        "Received Nokia Number Verification OAuth callback; state_present=%s",
+        bool(state),
+    )
+
+    return {
+        "status": "authorization_received",
+        "code_received": "true",
+        "state_received": "true",
+    }
 
 @router.post("/device-status", response_model=ApiResponse[List[DeviceStatus]])
 async def device_status(device_ids: List[str]):
