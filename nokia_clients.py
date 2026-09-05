@@ -1047,8 +1047,32 @@ async def number_verification_callback(code: str, state: str) -> Dict[str, str]:
         )
 
     try:
-        device = client.devices.get(phone_number="+99999991000")
-        verified = device.verify_number(code=code, state=state)
+        settings = get_settings()
+
+        if not settings.nac_api_token:
+            raise HTTPException(
+                status_code=503,
+                detail="Nokia API token is not configured.",
+            )
+
+        import network_as_code as nac
+
+        oauth_client = nac.NetworkAsCodeClient(
+            token=settings.nac_api_token.get_secret_value(),
+        )
+
+        device = oauth_client.devices.get(
+            phone_number="+99999991000"
+        )
+
+        verified = device.verify_number(
+            code=code,
+            state=state,
+        )
+
+    except HTTPException:
+        raise
+
     except Exception as exc:
         logger.exception("Nokia Number Verification failed.")
         raise HTTPException(
