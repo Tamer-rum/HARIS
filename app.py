@@ -582,7 +582,7 @@ def render_header(result: Optional[Dict[str, Any]]) -> None:
 
     c.metric(
         "Network Capabilities",
-        "6",
+        "7",
     )
 
     d.metric(
@@ -614,6 +614,7 @@ def render_capability_matrix(result: Optional[Dict[str, Any]]) -> None:
         ("geofencing", "Geofencing"),
         ("qod", "QoD"),
         ("slicing", "Network Slicing"),
+        ("trusted_dispatch", "TRUSTED DISPATCH"),
     ]
     display = {
         "READ_READY": "READ READY",
@@ -621,11 +622,12 @@ def render_capability_matrix(result: Optional[Dict[str, Any]]) -> None:
         "SDK_SUPPORTED_CONFIG_MISSING": "CONFIG MISSING",
         "OPERATOR_VALUE_REQUIRED": "OPERATOR RESOURCE REQUIRED",
         "SDK_UNSUPPORTED": "UNAVAILABLE",
+        "PRIVILEGED_ONLY": "PRIVILEGED ONLY",
     }
     st.markdown('<div class="section-title">🧩 <span>LIVE CAPABILITY MATRIX</span></div>', unsafe_allow_html=True)
     columns = st.columns(3)
     for index, (key, label) in enumerate(labels):
-        item = report.get(key, {})
+        item = report.get(key, {"status": "PRIVILEGED_ONLY", "reason": "Number Verification + SIM Swap; privileged field intervention only."})
         status = display.get(item.get("status"), str(item.get("status", "UNKNOWN")).replace("_", " "))
         with columns[index % 3]:
             st.metric(label, status)
@@ -1611,6 +1613,8 @@ def render_controls() -> None:
 def render_history() -> None:
     st.markdown('<div class="section-title">📜 <span>INCIDENT HISTORY / REPLAY</span></div>', unsafe_allow_html=True)
     records = get_system().memory.recent_incidents()
+    chain = get_system().memory.verify_audit_chain()
+    st.caption("AUDIT CHAIN: " + ("VALID" if chain.get("valid") else "LEGACY/INVALID") + " — tamper-evident append-only history")
     if not records:
         st.caption("No append-only audit history is available yet.")
         return
@@ -1618,6 +1622,16 @@ def render_history() -> None:
     selected = records[labels.index(st.selectbox("Replay an append-only audit record", labels))]
     st.caption(f"Mode: {selected.mode or 'N/A'} · Cells: {', '.join(selected.affected_cells) or 'N/A'} · Outcome: {selected.outcome}")
     st.json(get_system().memory.normalized_view(selected))
+
+
+def render_playbook_and_feed(result: Optional[Dict[str, Any]]) -> None:
+    st.markdown('<div class="section-title">📋 <span>ACTIVE PLAYBOOK</span></div>', unsafe_allow_html=True)
+    playbook = (result or {}).get("active_playbook", {})
+    st.json(playbook or {"name": "N/A", "state": "IDLE", "latest_outcome": "N/A"})
+    st.markdown('<div class="section-title">📰 <span>INCIDENT FEED</span></div>', unsafe_allow_html=True)
+    events = (result or {}).get("events", [])
+    if events: st.dataframe(events, use_container_width=True, hide_index=True)
+    else: st.caption("No incident events yet.")
 
 
 # ============================================================================
@@ -1667,6 +1681,9 @@ render_controls()
 st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
 
 render_history()
+
+st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
+render_playbook_and_feed(result)
 
 render_html(
     """
