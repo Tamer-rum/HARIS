@@ -129,6 +129,14 @@ class EngineeringCompletionTests(unittest.TestCase):
         system.memory._incidents = [IncidentMemory(incident_id="legacy", summary="legacy", storm_type="sandstorm", peak_congestion_level="High", peak_confidence_level=1, affected_cells=[], affected_devices=[], actions=[], executed_actions=[], outcome="verified")]
         self.assertEqual(system.memory.verify_audit_chain()["reason"], "legacy_record_without_hash")
 
+    def test_streamlit_factory_memory_exposes_audit_chain(self):
+        # app.get_system constructs the production Streamlit dependency chain.
+        import app
+        system = app.get_system()
+        self.assertTrue(hasattr(system.memory, "verify_audit_chain"))
+        system.memory._incidents = []
+        self.assertEqual(system.memory.verify_audit_chain(), {"valid": True, "records": 0})
+
     def test_reasoning_router_mocked_success_malformed_and_failure_fallback(self):
         settings = AppSettings(nac_mode="fixture", fixture_dir="fixtures", gemini_api_key=None, groq_api_key=None)
         router = ReasoningRouter(settings)
