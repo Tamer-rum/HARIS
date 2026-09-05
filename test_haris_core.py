@@ -73,6 +73,9 @@ class HarisCoreTests(unittest.TestCase):
         self.assertTrue(result["verification"]["verified"])
         self.assertEqual(result["final_status"], "mitigated")
         self.assertTrue(result["learning"]["incident_saved"])
+        self.assertEqual(result["active_playbook"]["state"], "MITIGATED")
+        self.assertEqual(result["active_playbook"]["current_stage"], "LEARN")
+        self.assertEqual(result["active_playbook"]["latest_outcome"], "mitigated")
 
     def test_failed_fixture_verification_reverses_executed_actions(self):
         settings = self.settings(rollback_test_mode=True)

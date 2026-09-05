@@ -1989,6 +1989,17 @@ class HarisAgentSystem:
             f"LEARN: final_status={state.get('final_status', 'MISSING')}",
         )
 
+        # The dashboard's active-playbook card follows the actual graph result,
+        # rather than retaining the provisional TRIAGE state.
+        if state.get("active_playbook"):
+            final_status = state.get("final_status", "unknown")
+            state["active_playbook"] = {
+                **state["active_playbook"],
+                "state": final_status.upper(),
+                "current_stage": "LEARN",
+                "latest_outcome": final_status,
+            }
+
         incident = Incident(**state["incident"])
         verification = state.get("verification", {})
         rollback = state.get("rollback", {})
