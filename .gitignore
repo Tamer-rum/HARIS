@@ -1,0 +1,25 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.env
+.env.*
+!.env.example
+.haris_memory.json
+*.pyc
+*.pyo
+*.log
+
+# IDE / OS
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Secrets / credentials
+*.key
+*.pem
+*.crt
+credentials.json
+secrets.json
+
+# Local runtime/cache
+.streamlit/secrets.toml

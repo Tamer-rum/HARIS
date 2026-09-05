@@ -1,0 +1,10 @@
+[
+  {"device_id":"ambulance-01","latitude":31.96,"longitude":35.91,"accuracy_m":25},
+  {"device_id":"scada-01","latitude":31.98,"longitude":35.88,"accuracy_m":35},
+  {"device_id":"pipeline-01","latitude":31.84,"longitude":36.02,"accuracy_m":40},
+  {"device_id":"dispatch-01","latitude":31.95,"longitude":35.93,"accuracy_m":20},
+  {"device_id":"sensor-01","latitude":31.97,"longitude":35.90,"accuracy_m":45},
+  {"device_id":"fleet-01","latitude":31.83,"longitude":36.01,"accuracy_m":50},
+  {"device_id":"fleet-02","latitude":31.85,"longitude":36.03,"accuracy_m":50},
+  {"device_id":"telemetry-01","latitude":31.82,"longitude":36.00,"accuracy_m":60}
+]

@@ -1,0 +1,10 @@
+[
+  {"device_id":"ambulance-01","reachable":true,"roaming":false,"battery_pct":71,"tier":1,"cell_id":"T03"},
+  {"device_id":"scada-01","reachable":true,"roaming":false,"battery_pct":58,"tier":1,"cell_id":"T03"},
+  {"device_id":"pipeline-01","reachable":true,"roaming":false,"battery_pct":49,"tier":1,"cell_id":"T05"},
+  {"device_id":"dispatch-01","reachable":true,"roaming":false,"battery_pct":64,"tier":1,"cell_id":"T02"},
+  {"device_id":"sensor-01","reachable":true,"roaming":false,"battery_pct":44,"tier":3,"cell_id":"T03"},
+  {"device_id":"fleet-01","reachable":true,"roaming":false,"battery_pct":63,"tier":3,"cell_id":"T05"},
+  {"device_id":"fleet-02","reachable":true,"roaming":false,"battery_pct":68,"tier":3,"cell_id":"T05"},
+  {"device_id":"telemetry-01","reachable":true,"roaming":false,"battery_pct":22,"tier":3,"cell_id":"T05"}
+]

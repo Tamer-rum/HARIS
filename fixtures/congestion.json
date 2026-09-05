@@ -1,0 +1,9 @@
+[
+  {"cell_id":"T01","congestion_level":"Low","confidence_level":90,"congestion_pct":22,"latency_ms":8,"predicted_congestion_pct":28,"observed_at":0},
+  {"cell_id":"T02","congestion_level":"Medium","confidence_level":90,"congestion_pct":31,"latency_ms":24,"predicted_congestion_pct":45,"observed_at":0},
+  {"cell_id":"T03","congestion_level":"High","confidence_level":90,"congestion_pct":78,"latency_ms":86,"predicted_congestion_pct":92,"observed_at":0},
+  {"cell_id":"T04","congestion_level":"Medium","confidence_level":90,"congestion_pct":42,"latency_ms":38,"predicted_congestion_pct":55,"observed_at":0},
+  {"cell_id":"T05","congestion_level":"High","confidence_level":90,"congestion_pct":73,"latency_ms":72,"predicted_congestion_pct":81,"observed_at":0},
+  {"cell_id":"T06","congestion_level":"Low","confidence_level":90,"congestion_pct":26,"latency_ms":9,"predicted_congestion_pct":35,"observed_at":0},
+  {"cell_id":"T07","congestion_level":"Low","confidence_level":90,"congestion_pct":18,"latency_ms":7,"predicted_congestion_pct":21,"observed_at":0}
+]
