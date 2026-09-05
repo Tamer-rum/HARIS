@@ -204,7 +204,8 @@ class AppSettings(BaseSettings):
     # Nokia Fast OAuth scope validated against the simulator; SDK resolves client credentials.
     nac_number_verification_scope: str = "dpv:FraudPreventionAndDetection number-verification:verify"
     trusted_dispatch_verification_ttl_seconds: int = Field(default=300, ge=1, le=3600)
-    trusted_dispatch_sim_swap_window_seconds: int = Field(default=86400, ge=1)
+    # Nokia SDK Device.verify_sim_swap(max_age) expects hours, not seconds.
+    trusted_dispatch_sim_swap_max_age_hours: int = Field(default=240, ge=1)
 
     gemini_api_key: Optional[SecretStr] = None
     groq_api_key: Optional[SecretStr] = None

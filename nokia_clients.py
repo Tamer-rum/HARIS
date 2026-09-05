@@ -1199,7 +1199,9 @@ async def trusted_dispatch(request: TrustedDispatchRequest) -> Dict[str, Any]:
         import network_as_code as nac
         identity_client = nac.NetworkAsCodeClient(token=settings.nac_api_token.get_secret_value())
         device = identity_client.devices.get(phone_number=request.phone_number)
-        recent = bool(device.verify_sim_swap(settings.trusted_dispatch_sim_swap_window_seconds))
+        # Public SDK wrapper around client._api.sim_swap.verify_sim_swap,
+        # which POSTs /check with maxAge expressed in hours.
+        recent = bool(device.verify_sim_swap(settings.trusted_dispatch_sim_swap_max_age_hours))
     except Exception:
         logger.warning("Trusted Dispatch SIM Swap verification failed closed")
         return {"decision": "BLOCK", "number_verified": True, "recent_sim_swap": None, "reason": "SIM Swap verification unavailable."}

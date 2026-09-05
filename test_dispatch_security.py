@@ -25,10 +25,13 @@ class DispatchSecurityTests(unittest.TestCase):
         self.assertEqual(result["decision"], "BLOCK")
 
     def test_trusted_dispatch_sim_swap_and_clean_allow_are_mocked(self):
-        settings = AppSettings(nac_mode="fixture", nac_api_token="test-token")
+        settings = AppSettings(nac_mode="fixture", nac_api_token="test-token", trusted_dispatch_sim_swap_max_age_hours=240)
+        calls = []
         class Device:
             def __init__(self, recent): self.recent = recent
-            def verify_sim_swap(self, _): return self.recent
+            def verify_sim_swap(self, max_age):
+                calls.append(max_age)
+                return self.recent
         class Devices:
             def __init__(self, recent): self.recent = recent
             def get(self, **_): return Device(self.recent)
@@ -40,9 +43,10 @@ class DispatchSecurityTests(unittest.TestCase):
             self.assertEqual(asyncio.run(trusted_dispatch(TrustedDispatchRequest(phone_number="+999900000001")))["decision"], "BLOCK")
             Client.recent = False
             self.assertEqual(asyncio.run(trusted_dispatch(TrustedDispatchRequest(phone_number="+999900000001")))["decision"], "ALLOW")
+        self.assertEqual(calls, [240, 240])
 
     def test_expired_verification_and_api_error_fail_closed(self):
-        settings = AppSettings(nac_mode="fixture", nac_api_token="test-token", trusted_dispatch_verification_ttl_seconds=1)
+        settings = AppSettings(nac_mode="fixture", nac_api_token="test-token", trusted_dispatch_verification_ttl_seconds=1, trusted_dispatch_sim_swap_max_age_hours=240)
         verified_identities._verified_at["+999900000003"] = time.time() - 2
         with patch("nokia_clients.get_settings", return_value=settings):
             self.assertEqual(asyncio.run(trusted_dispatch(TrustedDispatchRequest(phone_number="+999900000003")))["decision"], "BLOCK")
