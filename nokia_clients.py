@@ -4,6 +4,8 @@ import inspect
 import json
 import logging
 import random
+import secrets
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from abc import ABC, abstractmethod
@@ -11,7 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Generic, List, Optional, TypeVar
 
 from fastapi import APIRouter, FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from config import AppSettings, get_settings
 from memory import MemoryStore
@@ -961,6 +963,90 @@ client = build_nokia_client()
 router = APIRouter(prefix="/api/nac", tags=["Nokia Network as Code"])
 
 
+class PendingNumberVerification(BaseModel):
+    phone_number: str = Field(min_length=3, max_length=32)
+    created_at: float
+    used: bool = False
+
+
+class NumberVerificationStateStore:
+    """Process-local, single-use OAuth state store; never logs secret values."""
+    ttl_seconds = 300
+    def __init__(self):
+        self._pending: Dict[str, PendingNumberVerification] = {}
+        self._lock = threading.Lock()
+    def create(self, phone_number: str) -> str:
+        state = secrets.token_urlsafe(32)
+        with self._lock:
+            self._pending[state] = PendingNumberVerification(phone_number=phone_number, created_at=time.time())
+        return state
+    def consume(self, state: str) -> PendingNumberVerification:
+        with self._lock:
+            item = self._pending.pop(state, None)
+            if item is None or item.used:
+                raise ValueError("unknown_or_replayed_state")
+            if time.time() - item.created_at > self.ttl_seconds:
+                raise ValueError("expired_state")
+            item.used = True
+            return item
+
+
+number_verification_states = NumberVerificationStateStore()
+
+
+class VerifiedIdentityStore:
+    """Server-held verification receipts bound to a phone number and TTL."""
+    def __init__(self):
+        self._verified_at: Dict[str, float] = {}
+        self._lock = threading.Lock()
+    def record(self, phone_number: str) -> None:
+        with self._lock: self._verified_at[phone_number] = time.time()
+    def is_fresh(self, phone_number: str, ttl_seconds: int) -> bool:
+        with self._lock:
+            timestamp = self._verified_at.get(phone_number)
+            if timestamp is None or time.time() - timestamp > ttl_seconds:
+                return False
+            return True
+
+
+verified_identities = VerifiedIdentityStore()
+
+
+class NumberVerificationStart(BaseModel):
+    phone_number: str = Field(min_length=3, max_length=32)
+
+
+class TrustedDispatchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    phone_number: str = Field(min_length=3, max_length=32)
+
+
+@router.post("/auth/number-verification/start")
+async def number_verification_start(request: NumberVerificationStart) -> Dict[str, str]:
+    settings = get_settings()
+    if not settings.nac_api_token or not settings.nac_number_verification_redirect_uri:
+        raise HTTPException(status_code=503, detail="Number Verification OAuth configuration is unavailable.")
+    state = number_verification_states.create(request.phone_number)
+    try:
+        import network_as_code as nac
+        oauth_client = nac.NetworkAsCodeClient(token=settings.nac_api_token.get_secret_value())
+        url = await asyncio.to_thread(
+            oauth_client.authorization.create_authorization_link,
+            settings.nac_number_verification_redirect_uri,
+            settings.nac_number_verification_scope,
+            request.phone_number,
+            state,
+        )
+    except Exception as exc:
+        # State has not been used; remove it rather than retaining an unusable flow.
+        with number_verification_states._lock:
+            number_verification_states._pending.pop(state, None)
+        logger.warning("Number Verification authorization-link generation failed")
+        raise HTTPException(status_code=502, detail="Number Verification authorization is unavailable.") from exc
+    # Return is necessary to redirect a user agent; it is never logged.
+    return {"authorization_url": url, "expires_in_seconds": str(number_verification_states.ttl_seconds)}
+
+
 @router.get("/health")
 async def health() -> Dict[str, str]:
     """Unauthenticated deployment health check; does not call Nokia."""
@@ -1047,6 +1133,7 @@ async def number_verification_callback(code: str, state: str) -> Dict[str, str]:
         )
 
     try:
+        pending = number_verification_states.consume(state)
         settings = get_settings()
 
         if not settings.nac_api_token:
@@ -1062,7 +1149,7 @@ async def number_verification_callback(code: str, state: str) -> Dict[str, str]:
         )
 
         device = oauth_client.devices.get(
-            phone_number="+99999991000"
+            phone_number=pending.phone_number
         )
 
         verified = device.verify_number(
@@ -1073,6 +1160,9 @@ async def number_verification_callback(code: str, state: str) -> Dict[str, str]:
     except HTTPException:
         raise
 
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid, expired, or already-used OAuth state.")
+
     except Exception as exc:
         logger.exception("Nokia Number Verification failed.")
         raise HTTPException(
@@ -1080,15 +1170,36 @@ async def number_verification_callback(code: str, state: str) -> Dict[str, str]:
             detail="Number Verification request failed.",
         ) from exc
 
-    logger.info(
-        "Completed Nokia Number Verification; verified=%s",
-        verified,
-    )
+    logger.info("Completed Nokia Number Verification; verified=%s", bool(verified))
+
+    if verified:
+        verified_identities.record(pending.phone_number)
 
     return {
         "status": "verified" if verified else "not_verified",
         "phone_number_verified": str(bool(verified)).lower(),
     }
+
+
+@router.post("/trusted-dispatch/evaluate")
+async def trusted_dispatch(request: TrustedDispatchRequest) -> Dict[str, Any]:
+    """Sensitive dispatch trust gate; independent from fixture network client."""
+    settings = get_settings()
+    if not verified_identities.is_fresh(request.phone_number, settings.trusted_dispatch_verification_ttl_seconds):
+        return {"decision": "BLOCK", "number_verified": False, "recent_sim_swap": None, "reason": "Fresh server-side Number Verification is required."}
+    if not settings.nac_api_token:
+        return {"decision": "BLOCK", "number_verified": True, "recent_sim_swap": None, "reason": "SIM Swap verification unavailable."}
+    try:
+        import network_as_code as nac
+        identity_client = nac.NetworkAsCodeClient(token=settings.nac_api_token.get_secret_value())
+        device = identity_client.devices.get(phone_number=request.phone_number)
+        recent = bool(device.verify_sim_swap(settings.trusted_dispatch_sim_swap_window_seconds))
+    except Exception:
+        logger.warning("Trusted Dispatch SIM Swap verification failed closed")
+        return {"decision": "BLOCK", "number_verified": True, "recent_sim_swap": None, "reason": "SIM Swap verification unavailable."}
+    if recent:
+        return {"decision": "BLOCK", "number_verified": True, "recent_sim_swap": True, "reason": "Recent SIM swap detected."}
+    return {"decision": "ALLOW", "number_verified": True, "recent_sim_swap": False, "reason": "Number Verification passed and no recent SIM swap was detected."}
 
 
 @router.post("/device-status", response_model=ApiResponse[List[DeviceStatus]])

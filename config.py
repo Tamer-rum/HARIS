@@ -200,6 +200,10 @@ class AppSettings(BaseSettings):
     nac_qod_sink: Optional[str] = None
     nac_emergency_slice_id: Optional[str] = None
     nac_slice_id_map: Dict[str, str] = Field(default_factory=dict)
+    nac_number_verification_redirect_uri: Optional[str] = None
+    nac_number_verification_scope: str = "dpv:FraudPreventionAndAuthentication#number-verification:verify-read"
+    trusted_dispatch_verification_ttl_seconds: int = Field(default=300, ge=1, le=3600)
+    trusted_dispatch_sim_swap_window_seconds: int = Field(default=86400, ge=1)
 
     gemini_api_key: Optional[SecretStr] = None
     groq_api_key: Optional[SecretStr] = None
