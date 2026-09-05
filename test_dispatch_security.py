@@ -5,7 +5,8 @@ import unittest
 from unittest.mock import patch
 
 from config import AppSettings
-from nokia_clients import NumberVerificationStateStore, TrustedDispatchRequest, trusted_dispatch, verified_identities
+from fastapi import HTTPException
+from nokia_clients import NumberVerificationStateStore, TrustedDispatchRequest, trusted_dispatch, verified_identities, number_verification_callback, number_verification_states
 
 
 class DispatchSecurityTests(unittest.TestCase):
@@ -48,6 +49,25 @@ class DispatchSecurityTests(unittest.TestCase):
         verified_identities.record("+999900000004")
         with patch("nokia_clients.get_settings", return_value=settings), patch("network_as_code.NetworkAsCodeClient", side_effect=RuntimeError("api failure")):
             self.assertEqual(asyncio.run(trusted_dispatch(TrustedDispatchRequest(phone_number="+999900000004")))["decision"], "BLOCK")
+
+    def test_number_verification_failure_logs_no_code_or_state(self):
+        settings = AppSettings(nac_mode="fixture", nac_api_token="test-token")
+        state = number_verification_states.create("+999900000005")
+        code = "sensitive-oauth-code"
+        class LeakyError(Exception):
+            status_code = 401
+            def __str__(self): return f"/verify?code={code}&state={state}"
+        class Devices:
+            def get(self, **_): raise LeakyError()
+        class Client:
+            def __init__(self, token): self.devices = Devices()
+        with patch("nokia_clients.get_settings", return_value=settings), patch("network_as_code.NetworkAsCodeClient", Client), self.assertLogs("haris.nokia", level="WARNING") as logs:
+            with self.assertRaises(HTTPException):
+                asyncio.run(number_verification_callback(code=code, state=state))
+        output = "\n".join(logs.output)
+        self.assertNotIn(code, output)
+        self.assertNotIn(state, output)
+        self.assertIn("status=401", output)
 
 
 if __name__ == "__main__": unittest.main(verbosity=2)

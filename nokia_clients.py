@@ -1164,7 +1164,13 @@ async def number_verification_callback(code: str, state: str) -> Dict[str, str]:
         raise HTTPException(status_code=400, detail="Invalid, expired, or already-used OAuth state.")
 
     except Exception as exc:
-        logger.exception("Nokia Number Verification failed.")
+        # SDK exceptions may embed /verify query parameters.  Do not attach the
+        # exception/traceback to logs because it can disclose OAuth code/state.
+        status = getattr(exc, "status_code", None)
+        if status is None:
+            response = getattr(exc, "response", None)
+            status = getattr(response, "status_code", None)
+        logger.warning("Nokia Number Verification failed; status=%s", status or "unknown")
         raise HTTPException(
             status_code=502,
             detail="Number Verification request failed.",
