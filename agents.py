@@ -253,12 +253,34 @@ class HarisAgentSystem:
         self.reasoning = ReasoningRouter(self.settings)
         self.forecaster = RiskForecaster()
         self.engineers = AuthorizedEngineerRegistry(self.settings.authorized_engineer_registry_path)
-        self.latest_dispatch: Dict[str, Any] = {}
+        self._latest_dispatch: Dict[str, Any] = {}
         register_dispatch_resume_handler(self._resume_pending_dispatch)
         self._cached_environment: Optional[bool] = None
         self.crewai_agents: Dict[str, Any] = {}
         self._init_crewai_agents()
         self.graph = self._build_graph()
+
+    @property
+    def geofencing_monitoring_enabled(self) -> bool:
+        """Backend-owned policy state consumed by the Streamlit supervisor."""
+        return self.settings.geofencing_monitoring_enabled
+
+    def set_geofencing_monitoring(self, enabled: bool) -> None:
+        """Set the policy only; it never creates/deletes a Nokia subscription."""
+        self.settings.geofencing_monitoring_enabled = bool(enabled)
+
+    @property
+    def current_dispatch_status(self) -> Dict[str, Any]:
+        """Read-only, sanitized dispatch state for UI/API presentation."""
+        return {
+            key: value for key, value in self._latest_dispatch.items()
+            if key != "authorization_url"
+        }
+
+    @property
+    def dispatch_authorization_url(self) -> Optional[str]:
+        """Transient consent handoff; deliberately excluded from audit/status."""
+        return self._latest_dispatch.get("authorization_url")
 
     def _init_crewai_agents(self) -> None:
         if not CREWAI_AVAILABLE:
@@ -877,11 +899,11 @@ class HarisAgentSystem:
                 started = await start_number_verification_for_dispatch(pending, self.settings)
                 # The authorization URL is transient UI handoff only; it is not
                 # written to trace, memory, events, or audit.
-                self.latest_dispatch = {**base, "pending_id": pending.pending_id, "decision": "BLOCK", "status": "WAITING_FOR_IDENTITY_VERIFICATION", "number_verified": False, "recent_sim_swap": None, "reason": "Fresh Number Verification consent is required before dispatch.", "authorization_url": started["authorization_url"]}
+                self._latest_dispatch = {**base, "pending_id": pending.pending_id, "decision": "BLOCK", "status": "WAITING_FOR_IDENTITY_VERIFICATION", "number_verified": False, "recent_sim_swap": None, "reason": "Fresh Number Verification consent is required before dispatch.", "authorization_url": started["authorization_url"]}
             except Exception:
                 pending_dispatches.complete(pending.pending_id, "BLOCKED")
-                self.latest_dispatch = {**base, "pending_id": pending.pending_id, "decision": "BLOCK", "status": "WAITING_FOR_IDENTITY_VERIFICATION", "number_verified": False, "recent_sim_swap": None, "reason": "Number Verification authorization is unavailable; dispatch remains fail-closed."}
-            return self.latest_dispatch
+                self._latest_dispatch = {**base, "pending_id": pending.pending_id, "decision": "BLOCK", "status": "WAITING_FOR_IDENTITY_VERIFICATION", "number_verified": False, "recent_sim_swap": None, "reason": "Number Verification authorization is unavailable; dispatch remains fail-closed."}
+            return self.current_dispatch_status
 
         trust = await evaluate_trusted_dispatch_phone(engineer.phone_number, self.settings)
         trusted_dispatch_history.record(DispatchAttempt(
@@ -906,7 +928,7 @@ class HarisAgentSystem:
             sim_swap_status=("RECENT_SWAP" if trust.get("recent_sim_swap") else "NO_RECENT_SWAP" if trust.get("recent_sim_swap") is False else "UNAVAILABLE"),
             warden_decision=trust["decision"], reason=trust["reason"], final_dispatch_status=status,
         ))
-        self.latest_dispatch = {"pending_id": pending.pending_id, "incident_id": pending.incident_id, "engineer_id": pending.engineer_id, "masked_phone_number": mask_phone_number(pending.phone_number), **trust, "status": status}
+        self._latest_dispatch = {"pending_id": pending.pending_id, "incident_id": pending.incident_id, "engineer_id": pending.engineer_id, "masked_phone_number": mask_phone_number(pending.phone_number), **trust, "status": status}
         if status == "BLOCKED":
             attempted = {item.engineer_id for item in trusted_dispatch_history.for_incident(pending.incident_id)}
             candidates = [item for item in self.engineers.eligible(site=pending.site, required_skills=["tower-inspection"]) if item.engineer_id not in attempted]
@@ -915,11 +937,11 @@ class HarisAgentSystem:
                 next_pending = pending_dispatches.create(incident_id=pending.incident_id, engineer_id=fallback.engineer_id, phone_number=fallback.phone_number, site=pending.site, intervention_type=pending.intervention_type, ttl_seconds=self.settings.trusted_dispatch_verification_ttl_seconds)
                 try:
                     started = await start_number_verification_for_dispatch(next_pending, self.settings)
-                    self.latest_dispatch = {"pending_id": next_pending.pending_id, "incident_id": pending.incident_id, "engineer_id": fallback.engineer_id, "engineer_name": fallback.name, "masked_phone_number": mask_phone_number(fallback.phone_number), "decision": "BLOCK", "status": "WAITING_FOR_IDENTITY_VERIFICATION", "fallback_from": pending.engineer_id, "reason": "Previous engineer blocked; awaiting fallback engineer consent.", "authorization_url": started["authorization_url"]}
+                    self._latest_dispatch = {"pending_id": next_pending.pending_id, "incident_id": pending.incident_id, "engineer_id": fallback.engineer_id, "engineer_name": fallback.name, "masked_phone_number": mask_phone_number(fallback.phone_number), "decision": "BLOCK", "status": "WAITING_FOR_IDENTITY_VERIFICATION", "fallback_from": pending.engineer_id, "reason": "Previous engineer blocked; awaiting fallback engineer consent.", "authorization_url": started["authorization_url"]}
                 except Exception:
                     pending_dispatches.complete(next_pending.pending_id, "BLOCKED")
             else:
-                self.latest_dispatch["status"] = "MANUAL_INTERVENTION_REQUIRED"
+                self._latest_dispatch["status"] = "MANUAL_INTERVENTION_REQUIRED"
 
     async def _cartographer(self, state: HarisState) -> HarisState:
         device_ids = state.get(

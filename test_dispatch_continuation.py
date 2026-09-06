@@ -61,7 +61,8 @@ class DispatchContinuationTests(unittest.TestCase):
             result = asyncio.run(system._evaluate_field_intervention(state))
         start.assert_awaited_once()
         self.assertEqual(result["status"], "WAITING_FOR_IDENTITY_VERIFICATION")
-        self.assertIn("authorization_url", result)
+        self.assertNotIn("authorization_url", result)
+        self.assertEqual(system.dispatch_authorization_url, "https://nokia.example/auth")
 
     def test_unknown_pending_and_oauth_binding_mismatch_fail_closed(self):
         store = PendingDispatchStore()
@@ -92,7 +93,7 @@ class DispatchContinuationTests(unittest.TestCase):
         pending = pending_dispatches.create(incident_id="i-sim", engineer_id="eng-demo-01", phone_number="+99999991000", site="T03", intervention_type="physical", ttl_seconds=60)
         with patch("agents.evaluate_trusted_dispatch_phone", new=AsyncMock(return_value={"decision":"ALLOW", "number_verified":True, "recent_sim_swap":False, "reason":"clean"})):
             asyncio.run(system._resume_pending_dispatch(pending))
-        self.assertEqual(system.latest_dispatch["status"], "APPROVED")
+        self.assertEqual(system.current_dispatch_status["status"], "APPROVED")
         self.assertEqual(trusted_dispatch_history.for_incident("i-sim")[-1].sim_swap_status, "NO_RECENT_SWAP")
 
     def test_recent_swap_falls_back_and_attempt_limit_fails_closed(self):
@@ -102,7 +103,7 @@ class DispatchContinuationTests(unittest.TestCase):
         with patch("agents.evaluate_trusted_dispatch_phone", new=AsyncMock(return_value={"decision":"BLOCK", "number_verified":True, "recent_sim_swap":True, "reason":"Recent SIM swap detected."})), patch("agents.start_number_verification_for_dispatch", new=AsyncMock()) as start:
             asyncio.run(system._resume_pending_dispatch(pending))
         start.assert_not_awaited()
-        self.assertEqual(system.latest_dispatch["status"], "MANUAL_INTERVENTION_REQUIRED")
+        self.assertEqual(system.current_dispatch_status["status"], "MANUAL_INTERVENTION_REQUIRED")
         self.assertEqual(trusted_dispatch_history.for_incident("i-limit")[-1].final_dispatch_status, "BLOCKED")
 
     def test_blocked_engineer_automatically_starts_next_eligible_engineer(self):
@@ -112,8 +113,8 @@ class DispatchContinuationTests(unittest.TestCase):
         with patch("agents.evaluate_trusted_dispatch_phone", new=AsyncMock(return_value={"decision":"BLOCK", "number_verified":True, "recent_sim_swap":True, "reason":"Recent SIM swap detected."})), patch("agents.start_number_verification_for_dispatch", new=AsyncMock(return_value={"authorization_url":"https://nokia.example/auth", "expires_in_seconds":"300"})) as start:
             asyncio.run(system._resume_pending_dispatch(pending))
         start.assert_awaited_once()
-        self.assertEqual(system.latest_dispatch["engineer_id"], "eng-demo-02")
-        self.assertEqual(system.latest_dispatch["status"], "WAITING_FOR_IDENTITY_VERIFICATION")
+        self.assertEqual(system.current_dispatch_status["engineer_id"], "eng-demo-02")
+        self.assertEqual(system.current_dispatch_status["status"], "WAITING_FOR_IDENTITY_VERIFICATION")
 
     def test_history_audit_and_sensitive_values_are_separated(self):
         attempt = DispatchAttempt(incident_id="i-audit", engineer_id="eng", masked_phone_number="***1000", site="T03", intervention_type="physical", verification_status="VERIFIED", reason="clean", final_dispatch_status="APPROVED")

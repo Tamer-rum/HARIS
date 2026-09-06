@@ -137,6 +137,31 @@ class EngineeringCompletionTests(unittest.TestCase):
         system.memory._incidents = []
         self.assertEqual(system.memory.verify_audit_chain(), {"valid": True, "records": 0})
 
+    def test_streamlit_system_exposes_safe_policy_and_dispatch_accessors(self):
+        settings = AppSettings(nac_mode="fixture", fixture_dir="fixtures", gemini_api_key=None, groq_api_key=None)
+        system = HarisAgentSystem(FixtureNokiaClient(settings), settings=settings)
+        self.assertTrue(system.geofencing_monitoring_enabled)
+        system.set_geofencing_monitoring(False)
+        self.assertFalse(system.geofencing_monitoring_enabled)
+        self.assertEqual(system.current_dispatch_status, {})
+        system._latest_dispatch = {"status": "WAITING_FOR_IDENTITY_VERIFICATION", "masked_phone_number": "***1000", "authorization_url": "https://private.example/state"}
+        self.assertEqual(system.current_dispatch_status["status"], "WAITING_FOR_IDENTITY_VERIFICATION")
+        self.assertNotIn("authorization_url", system.current_dispatch_status)
+        self.assertEqual(system.dispatch_authorization_url, "https://private.example/state")
+
+    def test_streamlit_five_sections_render_with_empty_status(self):
+        import app
+        # Bare-mode rendering exercises the same dependencies used by Streamlit;
+        # no endpoint or Nokia operation is invoked by these presentation calls.
+        app.render_overview(None)
+        app.render_network_intelligence(None)
+        app.render_controls()
+        app.render_decision_engine(None)
+        app.render_impact(None)
+        app.render_playbook_and_feed(None)
+        app.render_trusted_dispatch(None)
+        app.render_history_audit(None)
+
     def test_reasoning_router_mocked_success_malformed_and_failure_fallback(self):
         settings = AppSettings(nac_mode="fixture", fixture_dir="fixtures", gemini_api_key=None, groq_api_key=None)
         router = ReasoningRouter(settings)

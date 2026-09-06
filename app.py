@@ -1642,8 +1642,8 @@ def render_overview(result: Optional[Dict[str, Any]]) -> None:
 
 def render_network_intelligence(result: Optional[Dict[str, Any]]) -> None:
     st.markdown('### NETWORK INTELLIGENCE')
-    enabled = st.toggle("Geofencing Monitoring", value=bool(get_system().settings.geofencing_monitoring_enabled))
-    get_system().settings.geofencing_monitoring_enabled = enabled
+    enabled = st.toggle("Geofencing Monitoring", value=get_system().geofencing_monitoring_enabled)
+    get_system().set_geofencing_monitoring(enabled)
     st.caption("HARIS creates and cleans up geofence subscriptions only when policy and a playbook require it.")
     render_environment(result)
     render_prediction(result)
@@ -1656,13 +1656,14 @@ def render_network_intelligence(result: Optional[Dict[str, Any]]) -> None:
 
 def render_trusted_dispatch(result: Optional[Dict[str, Any]]) -> None:
     st.markdown('### TRUSTED DISPATCH')
-    dispatch = (result or {}).get("trusted_dispatch") or get_system().latest_dispatch
+    dispatch = (result or {}).get("trusted_dispatch") or get_system().current_dispatch_status
     if dispatch:
         safe_status = {key: value for key, value in dispatch.items() if key != "authorization_url"}
         st.json(safe_status)
         if dispatch.get("status") == "WAITING_FOR_IDENTITY_VERIFICATION": st.warning("Awaiting consent-bound Nokia Number Verification; dispatch remains blocked.")
-        if dispatch.get("authorization_url"):
-            st.link_button("Open secure Nokia Number Verification", dispatch["authorization_url"], type="primary")
+        authorization_url = get_system().dispatch_authorization_url
+        if authorization_url:
+            st.link_button("Open secure Nokia Number Verification", authorization_url, type="primary")
     else: st.caption("No privileged field intervention is required. Routine remediation does not call Number Verification or SIM Swap.")
 
 
