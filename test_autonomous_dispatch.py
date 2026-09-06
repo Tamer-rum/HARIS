@@ -55,6 +55,26 @@ class AutonomousDispatchTests(unittest.TestCase):
         self.assertEqual(result["final_status"], "waiting_for_identity_verification")
         self.assertFalse(result["warden"]["verified"])
 
+    def test_pending_identity_is_a_checkpoint_not_a_failed_or_rollback_cycle(self):
+        system = self.system()
+        result = asyncio.run(system.run_cycle(
+            dust_advisory=True,
+            field_intervention_required=True,
+            field_intervention_site="T03",
+            field_intervention_skills=["tower-inspection"],
+        ))
+        self.assertEqual(result["trusted_dispatch"]["status"], "WAITING_FOR_IDENTITY_VERIFICATION")
+        self.assertEqual(result["warden"]["reason"], "identity_verification_pending")
+        self.assertEqual(result["execution"]["reason"], "identity_verification_pending")
+        self.assertEqual(result["verification"]["status"], "identity_verification_pending")
+        self.assertEqual(result["final_status"], "waiting_for_identity_verification")
+        self.assertFalse(result.get("rollback_attempted", False))
+        self.assertEqual(result["learning"]["outcome"], "identity_verification_pending")
+        trace = "\n".join(result["trace"])
+        self.assertIn("identity/trust authorization pending", trace)
+        self.assertIn("network remediation paused", trace)
+        self.assertNotIn("failed_or_unverified", trace)
+
     def test_recent_sim_swap_blocks_selected_engineer_and_records_attempt(self):
         system = self.system()
         verified_identities.record("+99999991000")

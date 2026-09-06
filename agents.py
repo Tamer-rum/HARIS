@@ -515,10 +515,12 @@ class HarisAgentSystem:
             )
             return "learn"
 
-        if verification.get("status") in {"live_read_only_proposal", "warden_rejected"}:
+        if verification.get("status") in {"live_read_only_proposal", "warden_rejected", "identity_verification_pending"}:
             self._trace(
                 state,
-                "ROUTER: no write was attempted; proceeding to LEARN without rollback",
+                "ROUTER: consent pending; proceeding to LEARN checkpoint without rollback"
+                if verification.get("status") == "identity_verification_pending"
+                else "ROUTER: no write was attempted; proceeding to LEARN without rollback",
             )
             return "learn"
 
@@ -637,13 +639,16 @@ class HarisAgentSystem:
     def _trace(self, state: HarisState, message: str) -> None:
         state.setdefault("trace", []).append(f"{time.strftime('%H:%M:%S')} | {message}")
         stage = message.split(":", 1)[0].strip().upper()
+        pending = "pending" in message.lower() or "waiting for consent" in message.lower()
         event_type = {
             "SENTINEL": "SENSE", "CARTOGRAPHER": "REASON", "TRIAGE": "ACTION_PROPOSED",
             "WARDEN": "WARDEN_APPROVED" if "approved" in message else "WARDEN_BLOCKED",
             "ACTUATOR": "ACTION_EXECUTED" if "executed" in message else "ACTION_FAILED",
             "VERIFY": "VERIFY", "ROLLBACK": "ROLLBACK", "LEARN": "LEARN",
         }.get(stage, stage)
-        state.setdefault("events", []).append({"timestamp": time.time(), "incident_id": state.get("incident", {}).get("incident_id"), "type": event_type, "agent": stage, "message": message, "status": "BLOCKED" if "blocked" in message or "rejected" in message else "OK", "metadata": {}})
+        if pending and stage in {"WARDEN", "ACTUATOR", "TRUST_CHECK"}:
+            event_type = "TRUST_CHECK"
+        state.setdefault("events", []).append({"timestamp": time.time(), "incident_id": state.get("incident", {}).get("incident_id"), "type": event_type, "agent": stage, "message": message, "status": "PENDING" if pending else "BLOCKED" if "blocked" in message or "rejected" in message else "OK", "metadata": {}})
 
 
     async def _warden(self, state: HarisState) -> HarisState:
@@ -743,6 +748,16 @@ class HarisAgentSystem:
                     safe = False
                     checks["trusted_dispatch_ok"] = False
 
+            pending_identity = (
+                state.get("trusted_dispatch", {}).get("status")
+                == "WAITING_FOR_IDENTITY_VERIFICATION"
+            )
+            dispatch_blocked = (
+                bool(state.get("field_intervention_required"))
+                and not pending_identity
+                and state.get("trusted_dispatch", {}).get("decision") == "BLOCK"
+            )
+
             state["warden"] = {
                 "verified": safe,
                 "required": True,
@@ -753,23 +768,28 @@ class HarisAgentSystem:
                 "approval_required": plan.approval_required,
                 "action_errors": action_errors,
                 "capability_report": self.client.capability_report(),
-                "reason": (
-                    "network_action_safe"
-                    if safe
-                    else "network_safety_constraints_failed"
+                "reason": "network_action_safe" if safe else (
+                    "identity_verification_pending" if pending_identity else
+                    "trusted_dispatch_blocked" if dispatch_blocked else
+                    "network_safety_constraints_failed"
                 ),
             }
 
-            self._trace(
-                state,
-                (
-            "WARDEN: network safety "
-                    f"{'approved' if safe else 'rejected'}; "
-                    f"confidence={plan.confidence:.2f}, "
-                    f"blast_radius={plan.blast_radius:.2f}, "
-                    f"cost=${plan.expected_cost_usd:.2f}"
-                ),
-            )
+            if pending_identity:
+                self._trace(state, "WARDEN: identity/trust authorization pending; network mutations paused pending engineer consent")
+            elif dispatch_blocked:
+                self._trace(state, f"WARDEN: trusted dispatch blocked; {state['trusted_dispatch'].get('reason', 'trust policy denied dispatch')}")
+            else:
+                self._trace(
+                    state,
+                    (
+                        "WARDEN: network safety "
+                        f"{'approved' if safe else 'rejected'}; "
+                        f"confidence={plan.confidence:.2f}, "
+                        f"blast_radius={plan.blast_radius:.2f}, "
+                        f"cost=${plan.expected_cost_usd:.2f}"
+                    ),
+                )
 
             return state
 
@@ -1038,6 +1058,7 @@ class HarisAgentSystem:
         ))
         self._latest_dispatch = {"pending_id": pending.pending_id, "incident_id": pending.incident_id, "engineer_id": pending.engineer_id, "masked_phone_number": mask_phone_number(pending.phone_number), **trust, "status": status}
         if status == "BLOCKED":
+            self._trace(self._latest_cycle, f"WARDEN: trusted dispatch blocked; {trust['reason']}")
             await self._start_fallback(pending, "Previous engineer blocked; awaiting fallback engineer consent.")
         await self._record_dispatch_transition(
             f"engineer={pending.engineer_id}; number_verification=VERIFIED; "
@@ -1073,6 +1094,7 @@ class HarisAgentSystem:
         try:
             started = await start_number_verification_for_dispatch(next_pending, self.settings)
             self._latest_dispatch = {"pending_id": next_pending.pending_id, "incident_id": pending.incident_id, "engineer_id": fallback.engineer_id, "engineer_name": fallback.name, "masked_phone_number": mask_phone_number(fallback.phone_number), "decision": "BLOCK", "status": "WAITING_FOR_IDENTITY_VERIFICATION", "fallback_from": pending.engineer_id, "reason": reason, "authorization_url": started["authorization_url"]}
+            self._trace(self._latest_cycle, f"TRUST_CHECK: fallback engineer selected; engineer={fallback.engineer_id}; waiting for consent")
         except Exception:
             pending_dispatches.complete(next_pending.pending_id, "BLOCKED")
 
@@ -1399,15 +1421,20 @@ class HarisAgentSystem:
             state.get("warden", {}).get("required")
             and not state.get("warden", {}).get("verified")
         ):
+            pending_identity = (
+                state.get("warden", {}).get("reason")
+                == "identity_verification_pending"
+            )
             self._trace(
                 state,
-                "ACTUATOR: WARDEN rejected network remediation; "
-                "no action executed",
+                "ACTUATOR: identity authorization pending; network remediation paused; no action executed"
+                if pending_identity else
+                "ACTUATOR: WARDEN rejected network remediation; no action executed",
             )
 
             state["execution"] = {
                 "executed": False,
-                "reason": "warden_rejected",
+                "reason": "identity_verification_pending" if pending_identity else "warden_rejected",
                 "actions": [],
             }
 
@@ -1816,6 +1843,9 @@ class HarisAgentSystem:
         elif not executed:
             verified = False
             verification_status = (
+                "identity_verification_pending"
+                if state.get("execution", {}).get("reason") == "identity_verification_pending"
+                else
                 "warden_rejected"
                 if state.get("execution", {}).get("reason") == "warden_rejected"
                 else "execution_failed_partial"
@@ -1885,6 +1915,8 @@ class HarisAgentSystem:
             state["final_status"] = "no_action_proposed"
         elif verification_status == "execution_failed":
             state["final_status"] = "execution_failed"
+        elif verification_status == "identity_verification_pending":
+            state["final_status"] = "waiting_for_identity_verification"
         elif verification_status == "warden_rejected":
             state["final_status"] = (
                 "waiting_for_identity_verification"
@@ -2306,6 +2338,9 @@ class HarisAgentSystem:
         elif state.get("final_status") == "no_action_proposed":
             outcome = "no_action_proposed"
 
+        elif state.get("final_status") == "waiting_for_identity_verification":
+            outcome = "identity_verification_pending"
+
         elif plan.get("approval_required"):
             outcome = "guardrail_or_approval_required"
 
@@ -2381,7 +2416,7 @@ class HarisAgentSystem:
         self._trace(
             state,
             (
-                "LEARN: incident stored; "
+                "LEARN: workflow checkpoint stored; "
                 f"outcome={outcome}; "
                 f"episodic memory count={self.memory.count()}"
             ),
