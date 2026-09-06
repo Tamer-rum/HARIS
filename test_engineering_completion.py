@@ -162,6 +162,59 @@ class EngineeringCompletionTests(unittest.TestCase):
         app.render_trusted_dispatch(None)
         app.render_history_audit(None)
 
+    def test_streamlit_nullable_backend_status_is_authoritative_and_safe(self):
+        import app
+        class FakeMemory:
+            def recent_incidents(self): return []
+            def verify_audit_chain(self): return {"valid": True, "records": 0}
+            def normalized_view(self, item): return item
+        class FakeSystem:
+            geofencing_monitoring_enabled = True
+            current_dispatch_status = {}
+            dispatch_authorization_url = None
+            memory = FakeMemory()
+            class client:
+                name = "fixture"
+                @staticmethod
+                def capability_report(): return {}
+            def set_geofencing_monitoring(self, _enabled): pass
+        cycle = {
+            "final_status": None, "incident": None, "prediction": None,
+            "warden": None, "plan": None, "execution": None,
+            "verification": None, "rollback": None, "learning": None,
+            "events": None, "trace": None, "active_playbook": None,
+            "trusted_dispatch": {
+                "status": "WAITING_FOR_IDENTITY_VERIFICATION",
+                "incident_id": "inc-wait", "engineer_id": "eng-demo-02",
+                "masked_phone_number": "***1001",
+            },
+        }
+        supervisory = {
+            "haris_state": "WAITING_FOR_IDENTITY_VERIFICATION",
+            "active_incident": {"incident_id": "inc-wait"},
+            "dispatch_history": [],
+            "audit": {"chain": {"valid": True, "records": 0}, "records": []},
+        }
+        fake = FakeSystem()
+        with patch.object(app, "get_system", return_value=fake), patch.object(app.st, "caption") as caption:
+            app.render_status_bar(cycle, supervisory)
+            rendered = " ".join(str(call.args[0]) for call in caption.call_args_list if call.args)
+            self.assertIn("WAITING_FOR_IDENTITY_VERIFICATION", rendered)
+            self.assertIn("inc-wait", rendered)
+            # Exercise all five supervisory sections with the same nullable
+            # backend payload; none may assume a completed cycle.
+            app.render_overview(cycle, supervisory)
+            app.render_network_intelligence(cycle)
+            app.render_controls()
+            app.render_decision_engine(cycle)
+            app.render_impact(cycle)
+            app.render_playbook_and_feed(cycle)
+            app.render_trusted_dispatch(cycle, supervisory)
+            app.render_history_audit(cycle, supervisory)
+        self.assertEqual(app.authoritative_haris_state({}, {}), "READY")
+        self.assertEqual(app.authoritative_haris_state({"final_status": "mitigated"}, {}), "MITIGATED")
+        self.assertEqual(app.authoritative_haris_state({"final_status": "rolled_back_safely"}, {}), "ROLLED_BACK_SAFELY")
+
     def test_api_startup_is_lazy_when_scheduler_disabled(self):
         import run_api
         run_api._system = None

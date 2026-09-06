@@ -325,6 +325,11 @@ class HarisAgentSystem:
         """
         cycle = self.current_cycle_status
         dispatch = cycle.get("trusted_dispatch", {})
+        haris_state = (
+            dispatch.get("status")
+            if dispatch.get("status") in {"WAITING_FOR_IDENTITY_VERIFICATION", "MANUAL_INTERVENTION_REQUIRED"}
+            else cycle.get("final_status") or "READY"
+        )
         active = (
             cycle.get("incident", {})
             if dispatch.get("status") in {"WAITING_FOR_IDENTITY_VERIFICATION", "MANUAL_INTERVENTION_REQUIRED"}
@@ -332,6 +337,7 @@ class HarisAgentSystem:
         )
         records = [self.memory.normalized_view(item) for item in self.memory.recent_incidents()]
         return self._supervisory_safe({
+            "haris_state": haris_state,
             "cycle": cycle,
             "active_incident": active,
             "dispatch_history": cycle.get("dispatch_history", []),

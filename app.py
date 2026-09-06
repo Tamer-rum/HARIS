@@ -42,6 +42,29 @@ def render_html(html: str) -> None:
     """Render multiline HTML without Streamlit interpreting indented lines as code."""
     st.markdown(re.sub(r"\s+", " ", textwrap.dedent(html).strip()), unsafe_allow_html=True)
 
+
+def safe_mapping(value: Any) -> Dict[str, Any]:
+    """Treat nullable backend JSON objects as empty presentation objects."""
+    return value if isinstance(value, dict) else {}
+
+
+def safe_upper(value: Any, fallback: str) -> str:
+    """Format optional API strings without displaying a literal ``None``."""
+    return str(value or fallback).upper()
+
+
+def authoritative_haris_state(result: Optional[Dict[str, Any]], supervisory: Optional[Dict[str, Any]] = None) -> str:
+    """Prefer Render's active workflow state over a nullable completed-cycle value."""
+    supervisory = safe_mapping(supervisory)
+    cycle = safe_mapping(result)
+    dispatch = safe_mapping(cycle.get("trusted_dispatch"))
+    return safe_upper(
+        supervisory.get("haris_state")
+        or dispatch.get("status")
+        or cycle.get("final_status"),
+        "READY",
+    )
+
 st.set_page_config(
     page_title="HARIS — Network Resilience",
     page_icon="🛡️",
@@ -537,8 +560,8 @@ def tower_state(
 # Header
 # ============================================================================
 
-def render_header(result: Optional[Dict[str, Any]]) -> None:
-    final_status = (result or {}).get("final_status")
+def render_header(result: Optional[Dict[str, Any]], supervisory: Optional[Dict[str, Any]] = None) -> None:
+    final_status = authoritative_haris_state(result, supervisory).lower()
 
     if final_status == "mitigated":
         text = "MITIGATED"
@@ -646,7 +669,7 @@ def render_header(result: Optional[Dict[str, Any]]) -> None:
 
 def render_capability_matrix(result: Optional[Dict[str, Any]]) -> None:
     """Display WARDEN's one shared capability assessment."""
-    report = (result or {}).get("warden", {}).get("capability_report")
+    report = safe_mapping(safe_mapping(result).get("warden")).get("capability_report")
     if not report:
         report = get_system().client.capability_report()
 
@@ -688,12 +711,13 @@ def render_environment(result: Optional[Dict[str, Any]]) -> None:
 
 
 def render_prediction(result: Optional[Dict[str, Any]]) -> None:
-    prediction = (result or {}).get("prediction")
+    prediction = safe_mapping(result).get("prediction")
     if not prediction:
         return
+    prediction = safe_mapping(prediction)
     st.markdown('<div class="section-title">🔮 <span>SHORT-HORIZON RISK FORECAST</span></div>', unsafe_allow_html=True)
     a, b, c, d = st.columns(4)
-    a.metric("Predicted Risk", prediction.get("predicted_risk_level", "N/A").upper())
+    a.metric("Predicted Risk", safe_upper(prediction.get("predicted_risk_level"), "N/A"))
     b.metric("Forecast Horizon", f"{prediction.get('horizon_minutes', 'N/A')} min")
     c.metric("Confidence", f"{float(prediction.get('confidence', 0)) * 100:.0f}%")
     d.metric("Degradation Probability", f"{float(prediction.get('degradation_probability', 0)) * 100:.0f}%")
@@ -1162,7 +1186,7 @@ def render_impact(
     baseline = baseline_map(result)
     current = congestion_map(result)
 
-    verification = result.get("verification", {})
+    verification = safe_mapping(result.get("verification"))
     target_cells = verification.get("target_cells") or []
 
     target = target_cells[0] if target_cells else None
@@ -1253,9 +1277,9 @@ def render_impact(
 
     st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
 
-    plan = result.get("plan", {})
-    execution = result.get("execution", {})
-    verification = result.get("verification", {})
+    plan = safe_mapping(result.get("plan"))
+    execution = safe_mapping(result.get("execution"))
+    verification = safe_mapping(result.get("verification"))
 
     a, b, c, d, e = st.columns(5)
 
@@ -1276,7 +1300,7 @@ def render_impact(
 
     d.metric(
         "Actions",
-        str(len(plan.get("actions", []))),
+        str(len(plan.get("actions") or [])),
     )
 
     e.metric(
@@ -1314,12 +1338,12 @@ def render_decision_engine(
         )
         return
 
-    plan = result.get("plan", {})
-    execution = result.get("execution", {})
-    verification = result.get("verification", {})
-    learning = result.get("learning", {})
-    warden = result.get("warden", {})
-    rollback = result.get("rollback", {})
+    plan = safe_mapping(result.get("plan"))
+    execution = safe_mapping(result.get("execution"))
+    verification = safe_mapping(result.get("verification"))
+    learning = safe_mapping(result.get("learning"))
+    warden = safe_mapping(result.get("warden"))
+    rollback = safe_mapping(result.get("rollback"))
     read_only = execution.get("reason") == "live_read_only"
     actuator_detail = (
         "Not executed — live read-only mode"
@@ -1350,7 +1374,7 @@ def render_decision_engine(
         (
             "03",
             "TRIAGE",
-            f"{len(plan.get('actions', []))} bounded actions",
+            f"{len(plan.get('actions') or [])} bounded actions",
             True,
         ),
         (
@@ -1423,9 +1447,7 @@ def render_decision_engine(
         render_html(html)
 
     with right:
-        status = str(
-            result.get("final_status", "review")
-        ).upper()
+        status = safe_upper(result.get("final_status"), "REVIEW")
 
         status_color = (
             "#42f59b"
@@ -1436,8 +1458,8 @@ def render_decision_engine(
         protected = len(
             [
                 action
-                for action in plan.get("actions", [])
-                if action.get("kind") == "slice_attach"
+                for action in plan.get("actions") or []
+                if safe_mapping(action).get("kind") == "slice_attach"
             ]
         )
 
@@ -1504,7 +1526,7 @@ def render_decision_engine(
         unsafe_allow_html=True,
     )
 
-    render_trace(result.get("trace", []))
+    render_trace(result.get("trace") or [])
     if result.get("explanation"):
         st.caption("EXPLANATION: " + result["explanation"])
 
@@ -1676,13 +1698,14 @@ def render_history(supervisory: Optional[Dict[str, Any]] = None) -> None:
 
 def render_playbook_and_feed(result: Optional[Dict[str, Any]]) -> None:
     st.markdown('<div class="section-title">📋 <span>ACTIVE PLAYBOOK</span></div>', unsafe_allow_html=True)
-    playbook = (result or {}).get("active_playbook", {})
+    cycle = safe_mapping(result)
+    playbook = safe_mapping(cycle.get("active_playbook"))
     st.json(playbook or {"name": "N/A", "state": "IDLE", "latest_outcome": "N/A"})
     st.markdown('<div class="section-title">📰 <span>INCIDENT FEED</span></div>', unsafe_allow_html=True)
-    events = (result or {}).get("events", [])
+    events = cycle.get("events") or []
     if events: st.dataframe(events, use_container_width=True, hide_index=True)
     else: st.caption("No incident events yet.")
-    dispatch = (result or {}).get("trusted_dispatch")
+    dispatch = safe_mapping(cycle.get("trusted_dispatch"))
     if dispatch:
         st.markdown('<div class="section-title">👷 <span>FIELD INTERVENTION / TRUSTED DISPATCH</span></div>', unsafe_allow_html=True)
         st.json(dispatch)
@@ -1694,30 +1717,33 @@ def render_playbook_and_feed(result: Optional[Dict[str, Any]]) -> None:
 
 def render_status_bar(result: Optional[Dict[str, Any]], supervisory: Optional[Dict[str, Any]] = None) -> None:
     """Persistent supervision state, intentionally not an API control surface."""
-    incident = (supervisory or {}).get("active_incident") or (result or {}).get("incident", {})
-    warden = (result or {}).get("warden", {})
+    cycle = safe_mapping(result)
+    supervisory = safe_mapping(supervisory)
+    incident = safe_mapping(supervisory.get("active_incident") or cycle.get("incident"))
+    warden = safe_mapping(cycle.get("warden"))
     st.caption(
-        f"HARIS STATE: {(result or {}).get('final_status', 'READY').upper()} | "
+        f"HARIS STATE: {authoritative_haris_state(cycle, supervisory)} | "
         f"NOKIA STATE: {get_system().client.name.upper()} | MODE: {settings.nac_mode.upper()} | "
         f"WARDEN: {'APPROVED' if warden.get('verified') else 'REVIEW'} | "
-        f"ACTIVE INCIDENT: {incident.get('incident_id', 'NONE')}"
+        f"ACTIVE INCIDENT: {incident.get('incident_id') or 'NONE'}"
     )
 
 
 def render_overview(result: Optional[Dict[str, Any]], supervisory: Optional[Dict[str, Any]] = None) -> None:
-    render_header(result)
-    incident = (supervisory or {}).get("active_incident") or (result or {}).get("incident", {})
-    prediction, warden = (result or {}).get("prediction", {}), (result or {}).get("warden", {})
+    render_header(result, supervisory)
+    cycle = safe_mapping(result)
+    incident = safe_mapping(safe_mapping(supervisory).get("active_incident") or cycle.get("incident"))
+    prediction, warden = safe_mapping(cycle.get("prediction")), safe_mapping(cycle.get("warden"))
     cols = st.columns(5)
     cols[0].metric("Backend Health", "HEALTHY")
     cols[1].metric("Nokia Integration", get_system().client.name.upper())
     cols[2].metric("WARDEN", "APPROVED" if warden.get("verified") else "STANDING BY")
     cols[3].metric("Active Incident", incident.get("incident_id", "None"))
-    cols[4].metric("Predicted Risk", prediction.get("predicted_risk_level", "Monitoring").upper())
+    cols[4].metric("Predicted Risk", safe_upper(prediction.get("predicted_risk_level"), "Monitoring"))
     st.markdown('### IMPORTANT NOTIFICATIONS')
-    events = (result or {}).get("events", [])[-6:]
+    events = (cycle.get("events") or [])[-6:]
     if events:
-        for event in reversed(events): st.info(event.get("message", "HARIS event"))
+        for event in reversed(events): st.info(safe_mapping(event).get("message") or "HARIS event")
     else: st.caption("No active notifications. HARIS is monitoring autonomously.")
     render_capability_matrix(result)
 
@@ -1730,7 +1756,7 @@ def render_network_intelligence(result: Optional[Dict[str, Any]]) -> None:
     render_environment(result)
     render_prediction(result)
     render_network_section(result)
-    geofence_events = [event for event in (result or {}).get("events", []) if "GEOFENCE" in event.get("message", "").upper()]
+    geofence_events = [event for event in (safe_mapping(result).get("events") or []) if "GEOFENCE" in safe_upper(safe_mapping(event).get("message"), "")]
     st.markdown('### GEOFENCE EVENTS')
     if geofence_events: st.dataframe(geofence_events, use_container_width=True, hide_index=True)
     else: st.caption("No Nokia geofence enter/exit event received.")
@@ -1747,7 +1773,7 @@ def render_trusted_dispatch(result: Optional[Dict[str, Any]], supervisory: Optio
                 st.session_state.backend_supervisory_status = payload
         except Exception:
             st.warning("Authoritative HARIS backend is unavailable; Trusted Dispatch remains fail-closed.")
-    dispatch = (result or {}).get("trusted_dispatch") or get_system().current_dispatch_status
+    dispatch = safe_mapping(safe_mapping(result).get("trusted_dispatch")) or get_system().current_dispatch_status
     if settings.haris_backend_url:
         sync_backend_consent_binding(dispatch)
     if dispatch:
