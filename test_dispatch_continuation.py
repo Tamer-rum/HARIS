@@ -10,7 +10,7 @@ from dispatch import DispatchAttempt, PendingDispatchStore, frontend_consent_tok
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from memory import IncidentMemory, MemoryStore
-from nokia_clients import app as api_app, number_verification_callback, number_verification_states, register_dispatch_resume_handler, register_dispatch_system_factory, verified_identities
+from nokia_clients import app as api_app, number_verification_callback, number_verification_states, register_dispatch_resume_handler, register_dispatch_system_factory, register_dispatch_verification_failure_handler, verified_identities
 from nokia_clients import FixtureNokiaClient
 
 
@@ -54,6 +54,37 @@ class DispatchContinuationTests(unittest.TestCase):
         self.assertEqual(handler.await_args.args[0].incident_id, "incident-a")
         with self.assertRaises(Exception):
             asyncio.run(number_verification_callback(code="opaque-code", state=state))
+
+    def test_verified_false_isolated_failure_handler_not_invalid_state(self):
+        pending = pending_dispatches.create(incident_id="incident-false", engineer_id="eng-a", phone_number="+99999991000", site="T03", intervention_type="physical", ttl_seconds=300)
+        state = number_verification_states.create(pending.phone_number, dispatch_pending_id=pending.pending_id, engineer_id=pending.engineer_id)
+        pending_dispatches.bind_oauth_state(pending.pending_id, state)
+        failure = AsyncMock(); register_dispatch_verification_failure_handler(failure)
+        class Device:
+            def verify_number(self, **_): return False
+        class Devices:
+            def get(self, **_): return Device()
+        class Client:
+            def __init__(self, **_): self.devices = Devices()
+        settings = AppSettings(nac_mode="fixture", nac_api_token="test")
+        with patch("nokia_clients.get_settings", return_value=settings), patch("network_as_code.NetworkAsCodeClient", Client):
+            response = asyncio.run(number_verification_callback(code="opaque", state=state))
+        self.assertEqual(response["status"], "not_verified")
+        failure.assert_awaited_once()
+        self.assertEqual(failure.await_args.args[0].engineer_id, "eng-a")
+
+    def test_verified_false_creates_distinct_fallback_pending_flow(self):
+        settings = AppSettings(nac_mode="fixture", fixture_dir="fixtures", nac_api_token="test", nac_number_verification_redirect_uri="https://callback.example", trusted_dispatch_max_attempts=2, gemini_api_key=None, groq_api_key=None)
+        system = HarisAgentSystem(FixtureNokiaClient(settings), settings=settings)
+        pending = pending_dispatches.create(incident_id="i-false-fallback", engineer_id="eng-demo-01", phone_number="+99999991000", site="T03", intervention_type="physical", ttl_seconds=60)
+        with patch("agents.start_number_verification_for_dispatch", new=AsyncMock(return_value={"authorization_url":"https://nokia.example/consent-b", "expires_in_seconds":"300"})) as start:
+            asyncio.run(system._handle_number_verification_failure(pending))
+        next_pending = start.await_args.args[0]
+        self.assertNotEqual(next_pending.pending_id, pending.pending_id)
+        self.assertNotEqual(next_pending.phone_number, pending.phone_number)
+        self.assertEqual(system.current_dispatch_status["engineer_id"], "eng-demo-02")
+        self.assertEqual(pending_dispatches.get(pending.pending_id).status, "BLOCKED")
+        self.assertEqual([item.engineer_id for item in trusted_dispatch_history.for_incident("i-false-fallback")], ["eng-demo-01"])
 
     def test_field_intervention_automatically_starts_verification(self):
         settings = AppSettings(nac_mode="fixture", fixture_dir="fixtures", nac_api_token="test", nac_number_verification_redirect_uri="https://callback.example", gemini_api_key=None, groq_api_key=None)
@@ -115,6 +146,8 @@ class DispatchContinuationTests(unittest.TestCase):
         with patch("agents.evaluate_trusted_dispatch_phone", new=AsyncMock(return_value={"decision":"BLOCK", "number_verified":True, "recent_sim_swap":True, "reason":"Recent SIM swap detected."})), patch("agents.start_number_verification_for_dispatch", new=AsyncMock(return_value={"authorization_url":"https://nokia.example/auth", "expires_in_seconds":"300"})) as start:
             asyncio.run(system._resume_pending_dispatch(pending))
         start.assert_awaited_once()
+        self.assertNotEqual(start.await_args.args[0].pending_id, pending.pending_id)
+        self.assertNotEqual(start.await_args.args[0].phone_number, pending.phone_number)
         self.assertEqual(system.current_dispatch_status["engineer_id"], "eng-demo-02")
         self.assertEqual(system.current_dispatch_status["status"], "WAITING_FOR_IDENTITY_VERIFICATION")
 
@@ -137,7 +170,7 @@ class DispatchContinuationTests(unittest.TestCase):
             dispatch_authorization_url = "https://nokia.example/consent"
             current_cycle_status = {
                 "final_status": "waiting_for_identity_verification",
-                "trusted_dispatch": {"pending_id": "pending-1", "status": "WAITING_FOR_IDENTITY_VERIFICATION", "masked_phone_number": "***1000"},
+                "trusted_dispatch": {"pending_id": "pending-1", "incident_id": "incident-1", "status": "WAITING_FOR_IDENTITY_VERIFICATION", "masked_phone_number": "***1000"},
             }
             current_dispatch_status = current_cycle_status["trusted_dispatch"]
             def __init__(self): self.calls = 0
@@ -154,14 +187,17 @@ class DispatchContinuationTests(unittest.TestCase):
         self.assertNotIn("authorization_url", status.json())
         self.assertNotIn("consent_action_token", status.json())
         token = response.json()["consent_action_token"]
+        workflow = response.json()["workflow_session_token"]
         with TestClient(api_app) as client:
             handoff = client.post("/api/nac/autonomous/consent-action", json={"action_token": token})
             replay = client.post("/api/nac/autonomous/consent-action", json={"action_token": token})
             wrong = client.post("/api/nac/autonomous/consent-action", json={"action_token": "x" * 32})
+            refreshed = client.post("/api/nac/autonomous/consent-action-token", json={"workflow_session_token": workflow})
         self.assertEqual(handoff.status_code, 200)
         self.assertEqual(handoff.json()["authorization_url"], "https://nokia.example/consent")
         self.assertEqual(replay.status_code, 403)
         self.assertEqual(wrong.status_code, 403)
+        self.assertEqual(refreshed.status_code, 200)
 
 
 if __name__ == "__main__": unittest.main(verbosity=2)

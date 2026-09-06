@@ -16,7 +16,7 @@ from fastapi import APIRouter, FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from config import AppSettings, get_settings
-from dispatch import PendingDispatch, frontend_consent_tokens, pending_dispatches
+from dispatch import PendingDispatch, frontend_consent_tokens, frontend_workflow_sessions, pending_dispatches
 from memory import MemoryStore
 from network_as_code.models import Device
 
@@ -1027,14 +1027,22 @@ class TrustedDispatchRequest(BaseModel):
 class ConsentActionRequest(BaseModel):
     action_token: str = Field(min_length=20, max_length=256)
 
+class WorkflowSessionRequest(BaseModel):
+    workflow_session_token: str = Field(min_length=20, max_length=256)
+
 
 dispatch_resume_handler: Optional[Callable[[PendingDispatch], Any]] = None
+dispatch_verification_failure_handler: Optional[Callable[[PendingDispatch], Any]] = None
 dispatch_system_factory: Optional[Callable[[], Any]] = None
 
 def register_dispatch_resume_handler(handler: Callable[[PendingDispatch], Any]) -> None:
     """Install the backend-owned continuation handler; never client controlled."""
     global dispatch_resume_handler
     dispatch_resume_handler = handler
+
+def register_dispatch_verification_failure_handler(handler: Callable[[PendingDispatch], Any]) -> None:
+    global dispatch_verification_failure_handler
+    dispatch_verification_failure_handler = handler
 
 def register_dispatch_system_factory(factory: Callable[[], Any]) -> None:
     """Register a lazy backend-system factory without constructing it on import."""
@@ -1137,7 +1145,8 @@ async def authoritative_field_intervention_demo() -> Dict[str, Any]:
     action_token = None
     if dispatch.get("pending_id") and system.dispatch_authorization_url:
         action_token = frontend_consent_tokens.issue(dispatch["pending_id"])
-    return {"cycle": system.current_cycle_status, "consent_action_token": action_token}
+    workflow_token = frontend_workflow_sessions.issue(dispatch["incident_id"]) if dispatch.get("incident_id") else None
+    return {"cycle": system.current_cycle_status, "consent_action_token": action_token, "workflow_session_token": workflow_token}
 
 
 @router.get("/autonomous/status")
@@ -1158,6 +1167,19 @@ async def autonomous_consent_action(request: ConsentActionRequest) -> Dict[str, 
     if system.current_dispatch_status.get("pending_id") != pending_id or not system.dispatch_authorization_url:
         raise HTTPException(status_code=403, detail="Consent action no longer matches the active dispatch.")
     return {"authorization_url": system.dispatch_authorization_url}
+
+@router.post("/autonomous/consent-action-token")
+async def autonomous_consent_action_token(request: WorkflowSessionRequest) -> Dict[str, str]:
+    """Issue a fresh one-time action token after a backend-managed fallback."""
+    system = _authoritative_haris_system()
+    try:
+        incident_id = frontend_workflow_sessions.incident_id(request.workflow_session_token)
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Workflow session is invalid or expired.")
+    dispatch = system.current_dispatch_status
+    if dispatch.get("incident_id") != incident_id or not dispatch.get("pending_id") or not system.dispatch_authorization_url:
+        raise HTTPException(status_code=403, detail="No matching active consent workflow.")
+    return {"consent_action_token": frontend_consent_tokens.issue(dispatch["pending_id"])}
 
 
 async def _wrap(fn: Callable[[], Any]) -> Any:
@@ -1241,7 +1263,7 @@ async def number_verification_callback(code: str, state: str) -> Dict[str, str]:
         raise
 
     except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid, expired, or already-used OAuth state.")
+        raise HTTPException(status_code=403, detail="Invalid, expired, or already-used OAuth state.")
 
     except Exception as exc:
         # SDK exceptions may embed /verify query parameters.  Do not attach the
@@ -1280,7 +1302,25 @@ async def number_verification_callback(code: str, state: str) -> Dict[str, str]:
                 # OAuth state is already consumed. Do not permit a mismatched
                 # dispatch binding to be resumed, and do not expose identifiers.
                 logger.warning("Trusted Dispatch continuation rejected")
-                raise HTTPException(status_code=400, detail="Trusted Dispatch continuation is invalid or expired.")
+                raise HTTPException(status_code=403, detail="Trusted Dispatch continuation is invalid or expired.")
+    elif pending.dispatch_pending_id and pending.engineer_id:
+        # A valid OAuth state with Nokia's explicit ``false`` result is an
+        # identity failure for this engineer only—not an invalid-state event.
+        try:
+            dispatch = pending_dispatches.consume_for_resume(
+                pending_id=pending.dispatch_pending_id, engineer_id=pending.engineer_id,
+                phone_number=pending.phone_number, oauth_state=state,
+            )
+            if dispatch_verification_failure_handler is None and dispatch_system_factory:
+                dispatch_system_factory()
+            if dispatch_verification_failure_handler:
+                failed = dispatch_verification_failure_handler(dispatch)
+                if inspect.isawaitable(failed): await failed
+            else:
+                pending_dispatches.complete(dispatch.pending_id, "BLOCKED")
+        except ValueError:
+            logger.warning("Trusted Dispatch continuation rejected")
+            raise HTTPException(status_code=403, detail="Trusted Dispatch continuation is invalid or expired.")
 
     return {
         "status": "verified" if verified else "not_verified",

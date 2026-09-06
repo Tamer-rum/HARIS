@@ -131,6 +131,26 @@ class FrontendConsentTokenStore:
             raise ValueError("invalid_or_expired_consent_token")
         return item[0]
 
+    def invalidate_pending(self, pending_id: str) -> None:
+        with self._lock:
+            self._tokens = {token: item for token, item in self._tokens.items() if item[0] != pending_id}
+
+
+class FrontendWorkflowSessionStore:
+    """Short-lived supervisory session bound to one backend incident."""
+    ttl_seconds = 600
+    def __init__(self) -> None:
+        self._tokens: Dict[str, tuple[str, float]] = {}
+        self._lock = threading.Lock()
+    def issue(self, incident_id: str) -> str:
+        token = secrets.token_urlsafe(32)
+        with self._lock: self._tokens[token] = (incident_id, time.time() + self.ttl_seconds)
+        return token
+    def incident_id(self, token: str) -> str:
+        with self._lock: item = self._tokens.get(token)
+        if item is None or time.time() > item[1]: raise ValueError("invalid_or_expired_workflow_session")
+        return item[0]
+
 
 class AuthorizedEngineerRegistry:
     def __init__(self, registry_path: str):
@@ -175,3 +195,4 @@ class TrustedDispatchHistory:
 trusted_dispatch_history = TrustedDispatchHistory()
 pending_dispatches = PendingDispatchStore()
 frontend_consent_tokens = FrontendConsentTokenStore()
+frontend_workflow_sessions = FrontendWorkflowSessionStore()

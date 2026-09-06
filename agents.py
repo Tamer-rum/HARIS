@@ -11,9 +11,9 @@ from pydantic import BaseModel, Field
 from langgraph.graph import END, START, StateGraph
 
 from config import AppSettings, DevicePolicy, EnvironmentalSource, QualityLevel, get_settings
-from dispatch import AuthorizedEngineerRegistry, DispatchAttempt, PendingDispatch, mask_phone_number, pending_dispatches, trusted_dispatch_history
+from dispatch import AuthorizedEngineerRegistry, DispatchAttempt, PendingDispatch, frontend_consent_tokens, mask_phone_number, pending_dispatches, trusted_dispatch_history
 from memory import IncidentMemory, MemoryStore
-from nokia_clients import BaseNokiaClient, CongestionReading, DeviceStatus, evaluate_trusted_dispatch_phone, register_dispatch_resume_handler, start_number_verification_for_dispatch, verified_identities
+from nokia_clients import BaseNokiaClient, CongestionReading, DeviceStatus, evaluate_trusted_dispatch_phone, register_dispatch_resume_handler, register_dispatch_verification_failure_handler, start_number_verification_for_dispatch, verified_identities
 from playbooks import Action, PlaybookEngine
 from prediction import PredictionResult, RiskForecaster
 
@@ -258,6 +258,7 @@ class HarisAgentSystem:
         self._latest_dispatch: Dict[str, Any] = {}
         self._latest_cycle: Dict[str, Any] = {}
         register_dispatch_resume_handler(self._resume_pending_dispatch)
+        register_dispatch_verification_failure_handler(self._handle_number_verification_failure)
         self._cached_environment: Optional[bool] = None
         self.crewai_agents: Dict[str, Any] = {}
         self._init_crewai_agents()
@@ -904,7 +905,7 @@ class HarisAgentSystem:
             return {"decision": "BLOCK", "status": "NO_ELIGIBLE_ENGINEER", "reason": "No eligible authorised engineer is available.", "attempts": len(attempted)}
 
         engineer = candidates[0]
-        base = {"engineer_id": engineer.engineer_id, "engineer_name": engineer.name, "masked_phone_number": mask_phone_number(engineer.phone_number), "site": site, "intervention_reason": state.get("field_intervention_reason") or "Physical inspection required.", "evidence_source": "FIXTURE / SIMULATED DEMO" if self.settings.nac_mode == "fixture" else "OPERATIONAL POLICY"}
+        base = {"incident_id": incident_id, "engineer_id": engineer.engineer_id, "engineer_name": engineer.name, "masked_phone_number": mask_phone_number(engineer.phone_number), "site": site, "intervention_reason": state.get("field_intervention_reason") or "Physical inspection required.", "evidence_source": "FIXTURE / SIMULATED DEMO" if self.settings.nac_mode == "fixture" else "OPERATIONAL POLICY"}
         if not verified_identities.is_fresh(engineer.phone_number, self.settings.trusted_dispatch_verification_ttl_seconds):
             pending = pending_dispatches.create(
                 incident_id=incident_id, engineer_id=engineer.engineer_id, phone_number=engineer.phone_number,
@@ -951,18 +952,35 @@ class HarisAgentSystem:
         ))
         self._latest_dispatch = {"pending_id": pending.pending_id, "incident_id": pending.incident_id, "engineer_id": pending.engineer_id, "masked_phone_number": mask_phone_number(pending.phone_number), **trust, "status": status}
         if status == "BLOCKED":
-            attempted = {item.engineer_id for item in trusted_dispatch_history.for_incident(pending.incident_id)}
-            candidates = [item for item in self.engineers.eligible(site=pending.site, required_skills=["tower-inspection"]) if item.engineer_id not in attempted]
-            if len(attempted) < self.settings.trusted_dispatch_max_attempts and candidates:
-                fallback = candidates[0]
-                next_pending = pending_dispatches.create(incident_id=pending.incident_id, engineer_id=fallback.engineer_id, phone_number=fallback.phone_number, site=pending.site, intervention_type=pending.intervention_type, ttl_seconds=self.settings.trusted_dispatch_verification_ttl_seconds)
-                try:
-                    started = await start_number_verification_for_dispatch(next_pending, self.settings)
-                    self._latest_dispatch = {"pending_id": next_pending.pending_id, "incident_id": pending.incident_id, "engineer_id": fallback.engineer_id, "engineer_name": fallback.name, "masked_phone_number": mask_phone_number(fallback.phone_number), "decision": "BLOCK", "status": "WAITING_FOR_IDENTITY_VERIFICATION", "fallback_from": pending.engineer_id, "reason": "Previous engineer blocked; awaiting fallback engineer consent.", "authorization_url": started["authorization_url"]}
-                except Exception:
-                    pending_dispatches.complete(next_pending.pending_id, "BLOCKED")
-            else:
-                self._latest_dispatch["status"] = "MANUAL_INTERVENTION_REQUIRED"
+            await self._start_fallback(pending, "Previous engineer blocked; awaiting fallback engineer consent.")
+
+    async def _handle_number_verification_failure(self, pending: PendingDispatch) -> None:
+        """Retire only the verified-false engineer before a fresh fallback."""
+        pending_dispatches.complete(pending.pending_id, "BLOCKED")
+        trusted_dispatch_history.record(DispatchAttempt(
+            incident_id=pending.incident_id, engineer_id=pending.engineer_id,
+            masked_phone_number=mask_phone_number(pending.phone_number), site=pending.site,
+            intervention_type=pending.intervention_type, verification_status="NOT_VERIFIED",
+            warden_decision="BLOCK", reason="Nokia Number Verification returned not verified.",
+            final_dispatch_status="BLOCKED",
+        ))
+        self._latest_dispatch = {"pending_id": pending.pending_id, "incident_id": pending.incident_id, "engineer_id": pending.engineer_id, "masked_phone_number": mask_phone_number(pending.phone_number), "decision": "BLOCK", "status": "BLOCKED", "number_verified": False, "recent_sim_swap": None, "reason": "Nokia Number Verification returned not verified."}
+        await self._start_fallback(pending, "Previous engineer was not verified; awaiting fallback engineer consent.")
+
+    async def _start_fallback(self, pending: PendingDispatch, reason: str) -> None:
+        frontend_consent_tokens.invalidate_pending(pending.pending_id)
+        attempted = {item.engineer_id for item in trusted_dispatch_history.for_incident(pending.incident_id)}
+        candidates = [item for item in self.engineers.eligible(site=pending.site, required_skills=["tower-inspection"]) if item.engineer_id not in attempted]
+        if len(attempted) >= self.settings.trusted_dispatch_max_attempts or not candidates:
+            self._latest_dispatch["status"] = "MANUAL_INTERVENTION_REQUIRED"
+            return
+        fallback = candidates[0]
+        next_pending = pending_dispatches.create(incident_id=pending.incident_id, engineer_id=fallback.engineer_id, phone_number=fallback.phone_number, site=pending.site, intervention_type=pending.intervention_type, ttl_seconds=self.settings.trusted_dispatch_verification_ttl_seconds)
+        try:
+            started = await start_number_verification_for_dispatch(next_pending, self.settings)
+            self._latest_dispatch = {"pending_id": next_pending.pending_id, "incident_id": pending.incident_id, "engineer_id": fallback.engineer_id, "engineer_name": fallback.name, "masked_phone_number": mask_phone_number(fallback.phone_number), "decision": "BLOCK", "status": "WAITING_FOR_IDENTITY_VERIFICATION", "fallback_from": pending.engineer_id, "reason": reason, "authorization_url": started["authorization_url"]}
+        except Exception:
+            pending_dispatches.complete(next_pending.pending_id, "BLOCKED")
 
     async def _cartographer(self, state: HarisState) -> HarisState:
         device_ids = state.get(

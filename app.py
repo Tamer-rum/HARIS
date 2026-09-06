@@ -416,6 +416,18 @@ async def backend_request(method: str, path: str, payload: Optional[Dict[str, An
         return response.json()
 
 
+def sync_backend_consent_binding(dispatch: Dict[str, Any]) -> None:
+    """Discard consent material when Render advances to another engineer."""
+    pending_id, engineer_id = dispatch.get("pending_id"), dispatch.get("engineer_id")
+    for prefix in ("backend_consent_action", "backend_authorization_url"):
+        bound_pending = st.session_state.get(f"{prefix}_pending_id")
+        bound_engineer = st.session_state.get(f"{prefix}_engineer_id")
+        if bound_pending and (bound_pending != pending_id or bound_engineer != engineer_id):
+            st.session_state.pop(prefix if prefix == "backend_authorization_url" else "backend_consent_action_token", None)
+            st.session_state.pop(f"{prefix}_pending_id", None)
+            st.session_state.pop(f"{prefix}_engineer_id", None)
+
+
 @st.cache_resource(show_spinner=False)
 def get_system() -> HarisAgentSystem:
     return HarisAgentSystem(
@@ -1586,6 +1598,10 @@ def render_controls() -> None:
                             raise RuntimeError("Authoritative HARIS backend did not return a demo status.")
                         st.session_state.last_result = payload.get("cycle", {})
                         st.session_state.backend_consent_action_token = payload.get("consent_action_token")
+                        st.session_state.backend_workflow_session_token = payload.get("workflow_session_token")
+                        dispatch = st.session_state.last_result.get("trusted_dispatch", {})
+                        st.session_state.backend_consent_action_pending_id = dispatch.get("pending_id")
+                        st.session_state.backend_consent_action_engineer_id = dispatch.get("engineer_id")
                         st.session_state.pop("backend_authorization_url", None)
                     else:
                         # Local standalone fixture fallback only. A deployed
@@ -1703,17 +1719,30 @@ def render_trusted_dispatch(result: Optional[Dict[str, Any]]) -> None:
         except Exception:
             st.warning("Authoritative HARIS backend is unavailable; Trusted Dispatch remains fail-closed.")
     dispatch = (result or {}).get("trusted_dispatch") or get_system().current_dispatch_status
+    if settings.haris_backend_url:
+        sync_backend_consent_binding(dispatch)
     if dispatch:
         safe_status = {key: value for key, value in dispatch.items() if key != "authorization_url"}
         st.json(safe_status)
         if dispatch.get("status") == "WAITING_FOR_IDENTITY_VERIFICATION": st.warning("Awaiting consent-bound Nokia Number Verification; dispatch remains blocked.")
         authorization_url = st.session_state.get("backend_authorization_url") if settings.haris_backend_url else get_system().dispatch_authorization_url
+        if settings.haris_backend_url and not authorization_url and not st.session_state.get("backend_consent_action_token") and st.session_state.get("backend_workflow_session_token"):
+            try:
+                token_payload = run_async(backend_request("POST", "/api/nac/autonomous/consent-action-token", {"workflow_session_token": st.session_state.backend_workflow_session_token}))
+                if token_payload:
+                    st.session_state.backend_consent_action_token = token_payload.get("consent_action_token")
+                    st.session_state.backend_consent_action_pending_id = dispatch.get("pending_id")
+                    st.session_state.backend_consent_action_engineer_id = dispatch.get("engineer_id")
+            except Exception:
+                st.warning("No active secure consent action is available; dispatch remains fail-closed.")
         if settings.haris_backend_url and not authorization_url and st.session_state.get("backend_consent_action_token"):
             try:
                 handoff = run_async(backend_request("POST", "/api/nac/autonomous/consent-action", {"action_token": st.session_state.backend_consent_action_token}))
                 if handoff:
                     authorization_url = handoff.get("authorization_url")
                     st.session_state.backend_authorization_url = authorization_url
+                    st.session_state.backend_authorization_url_pending_id = dispatch.get("pending_id")
+                    st.session_state.backend_authorization_url_engineer_id = dispatch.get("engineer_id")
                     st.session_state.pop("backend_consent_action_token", None)
             except Exception:
                 st.warning("Secure consent action is unavailable or expired; dispatch remains fail-closed.")
