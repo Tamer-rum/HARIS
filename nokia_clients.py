@@ -16,6 +16,7 @@ from fastapi import APIRouter, FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from config import AppSettings, get_settings
+from dispatch import PendingDispatch, pending_dispatches
 from memory import MemoryStore
 from network_as_code.models import Device
 
@@ -967,6 +968,8 @@ class PendingNumberVerification(BaseModel):
     phone_number: str = Field(min_length=3, max_length=32)
     created_at: float
     used: bool = False
+    dispatch_pending_id: Optional[str] = None
+    engineer_id: Optional[str] = None
 
 
 class NumberVerificationStateStore:
@@ -975,10 +978,10 @@ class NumberVerificationStateStore:
     def __init__(self):
         self._pending: Dict[str, PendingNumberVerification] = {}
         self._lock = threading.Lock()
-    def create(self, phone_number: str) -> str:
+    def create(self, phone_number: str, *, dispatch_pending_id: Optional[str] = None, engineer_id: Optional[str] = None) -> str:
         state = secrets.token_urlsafe(32)
         with self._lock:
-            self._pending[state] = PendingNumberVerification(phone_number=phone_number, created_at=time.time())
+            self._pending[state] = PendingNumberVerification(phone_number=phone_number, created_at=time.time(), dispatch_pending_id=dispatch_pending_id, engineer_id=engineer_id)
         return state
     def consume(self, state: str) -> PendingNumberVerification:
         with self._lock:
@@ -1019,6 +1022,33 @@ class NumberVerificationStart(BaseModel):
 class TrustedDispatchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     phone_number: str = Field(min_length=3, max_length=32)
+
+
+dispatch_resume_handler: Optional[Callable[[PendingDispatch], Any]] = None
+
+def register_dispatch_resume_handler(handler: Callable[[PendingDispatch], Any]) -> None:
+    """Install the backend-owned continuation handler; never client controlled."""
+    global dispatch_resume_handler
+    dispatch_resume_handler = handler
+
+
+async def start_number_verification_for_dispatch(pending: PendingDispatch, settings: Optional[AppSettings] = None) -> Dict[str, str]:
+    """Start the existing Nokia SDK OAuth flow, bound to one pending dispatch."""
+    settings = settings or get_settings()
+    if not settings.nac_api_token or not settings.nac_number_verification_redirect_uri:
+        raise RuntimeError("Number Verification OAuth configuration is unavailable")
+    state = number_verification_states.create(pending.phone_number, dispatch_pending_id=pending.pending_id, engineer_id=pending.engineer_id)
+    pending_dispatches.bind_oauth_state(pending.pending_id, state)
+    try:
+        import network_as_code as nac
+        oauth_client = nac.NetworkAsCodeClient(token=settings.nac_api_token.get_secret_value())
+        url = await asyncio.to_thread(oauth_client.authorization.create_authorization_link, settings.nac_number_verification_redirect_uri, settings.nac_number_verification_scope, pending.phone_number, state)
+        return {"authorization_url": url, "expires_in_seconds": str(number_verification_states.ttl_seconds)}
+    except Exception:
+        with number_verification_states._lock: number_verification_states._pending.pop(state, None)
+        pending_dispatches.complete(pending.pending_id, "BLOCKED")
+        logger.warning("Number Verification authorization-link generation failed")
+        raise
 
 
 @router.post("/auth/number-verification/start")
@@ -1180,6 +1210,22 @@ async def number_verification_callback(code: str, state: str) -> Dict[str, str]:
 
     if verified:
         verified_identities.record(pending.phone_number)
+        if pending.dispatch_pending_id and pending.engineer_id:
+            try:
+                dispatch = pending_dispatches.consume_for_resume(
+                    pending_id=pending.dispatch_pending_id, engineer_id=pending.engineer_id,
+                    phone_number=pending.phone_number, oauth_state=state,
+                )
+                if dispatch_resume_handler:
+                    resumed = dispatch_resume_handler(dispatch)
+                    if inspect.isawaitable(resumed): await resumed
+                else:
+                    pending_dispatches.complete(dispatch.pending_id, "VERIFIED")
+            except ValueError:
+                # OAuth state is already consumed. Do not permit a mismatched
+                # dispatch binding to be resumed, and do not expose identifiers.
+                logger.warning("Trusted Dispatch continuation rejected")
+                raise HTTPException(status_code=400, detail="Trusted Dispatch continuation is invalid or expired.")
 
     return {
         "status": "verified" if verified else "not_verified",

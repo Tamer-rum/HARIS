@@ -172,8 +172,11 @@ class MemoryStore:
             "prediction": audit.get("prediction") or None, "environment": audit.get("environment") or None,
             "plan": audit.get("plan") or None, "warden": audit.get("warden") or None,
             "execution": audit.get("execution") or None,
+            "trusted_dispatch": audit.get("trusted_dispatch") or None,
+            "dispatch_history": audit.get("dispatch_history") or [],
             "verification": audit.get("verification") or raw.get("verification") or None,
-            "rollback": audit.get("rollback") or raw.get("rollback") or None, "trace": audit.get("trace") or None,
+            "rollback": audit.get("rollback") or raw.get("rollback") or None,
+            "trace": audit.get("trace") or None, "events": audit.get("events") or [],
         }
 
     def get_incident(self, cycle_or_incident_id: str) -> Optional[IncidentMemory]:

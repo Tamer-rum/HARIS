@@ -97,14 +97,15 @@ class PlaybookEngine:
                     )
                 )
 
-                actions.append(
-                    Action(
-                        "geofence",
-                        d.device_id,
-                        {"polygon_id": "storm-impact"},
-                        "Pre-position event-driven exposure tracking",
+                if self.settings.geofencing_monitoring_enabled:
+                    actions.append(
+                        Action(
+                            "geofence",
+                            d.device_id,
+                            {"polygon_id": "storm-impact"},
+                            "Pre-position event-driven exposure tracking",
+                        )
                     )
-                )
 
         return actions
 

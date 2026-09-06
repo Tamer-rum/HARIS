@@ -1457,11 +1457,13 @@ def render_decision_engine(
     st.markdown("<div style='height:9px'></div>", unsafe_allow_html=True)
 
     st.markdown(
-        '<div class="panel-title">HUMAN-READABLE REASONING TRACE</div>',
+        '<div class="panel-title">AUTONOMOUS DECISION TRACE</div>',
         unsafe_allow_html=True,
     )
 
     render_trace(result.get("trace", []))
+    if result.get("explanation"):
+        st.caption("EXPLANATION: " + result["explanation"])
 
 
 # ============================================================================
@@ -1522,11 +1524,11 @@ def render_controls() -> None:
         unsafe_allow_html=True,
     )
 
-    a, b, c, d = st.columns([1.35, 1.0, 1.15, 2.0])
+    a, d = st.columns([1.35, 2.0])
 
     with a:
         if st.button(
-            "🌪️ INJECT SANDSTORM & RUN HARIS",
+            "🛡️ RUN AUTONOMOUS HARIS",
             use_container_width=True,
             type="primary",
         ):
@@ -1556,39 +1558,6 @@ def render_controls() -> None:
                     st.error(
                         f"HARIS cycle failed: {exc}"
                     )
-
-    with b:
-        if st.button(
-            "↺ RESET DEMO",
-            use_container_width=True,
-        ):
-            if settings.nac_mode == "fixture":
-                get_system.clear()
-            st.session_state.pop(
-                "last_result",
-                None,
-            )
-            st.session_state.pop(
-                "last_elapsed",
-                None,
-            )
-            st.rerun()
-
-    with c:
-        if settings.nac_mode == "fixture" and st.button(
-            "FORCE VERIFY FAILURE",
-            use_container_width=True,
-            help="DEMO TEST CONTROL: demonstrates rollback only in the fixture network.",
-        ):
-            demo_settings = settings.model_copy(update={"rollback_test_mode": True})
-            with st.spinner("Running deterministic rollback demonstration…"):
-                start = time.perf_counter()
-                result = run_async(
-                    HarisAgentSystem(build_nokia_client(demo_settings), settings=demo_settings).run_cycle(True)
-                )
-                st.session_state.last_result = result
-                st.session_state.last_elapsed = time.perf_counter() - start
-                st.rerun()
 
     with d:
         elapsed = st.session_state.get("last_elapsed")
@@ -1632,6 +1601,75 @@ def render_playbook_and_feed(result: Optional[Dict[str, Any]]) -> None:
     events = (result or {}).get("events", [])
     if events: st.dataframe(events, use_container_width=True, hide_index=True)
     else: st.caption("No incident events yet.")
+    dispatch = (result or {}).get("trusted_dispatch")
+    if dispatch:
+        st.markdown('<div class="section-title">👷 <span>FIELD INTERVENTION / TRUSTED DISPATCH</span></div>', unsafe_allow_html=True)
+        st.json(dispatch)
+
+
+# ============================================================================
+# Console sections
+# ============================================================================
+
+def render_status_bar(result: Optional[Dict[str, Any]]) -> None:
+    """Persistent supervision state, intentionally not an API control surface."""
+    incident = (result or {}).get("incident", {})
+    warden = (result or {}).get("warden", {})
+    st.caption(
+        f"HARIS STATE: {(result or {}).get('final_status', 'READY').upper()} | "
+        f"NOKIA STATE: {get_system().client.name.upper()} | MODE: {settings.nac_mode.upper()} | "
+        f"WARDEN: {'APPROVED' if warden.get('verified') else 'REVIEW'} | "
+        f"ACTIVE INCIDENT: {incident.get('incident_id', 'NONE')}"
+    )
+
+
+def render_overview(result: Optional[Dict[str, Any]]) -> None:
+    render_header(result)
+    incident, prediction, warden = (result or {}).get("incident", {}), (result or {}).get("prediction", {}), (result or {}).get("warden", {})
+    cols = st.columns(5)
+    cols[0].metric("Backend Health", "HEALTHY")
+    cols[1].metric("Nokia Integration", get_system().client.name.upper())
+    cols[2].metric("WARDEN", "APPROVED" if warden.get("verified") else "STANDING BY")
+    cols[3].metric("Active Incident", incident.get("incident_id", "None"))
+    cols[4].metric("Predicted Risk", prediction.get("predicted_risk_level", "Monitoring").upper())
+    st.markdown('### IMPORTANT NOTIFICATIONS')
+    events = (result or {}).get("events", [])[-6:]
+    if events:
+        for event in reversed(events): st.info(event.get("message", "HARIS event"))
+    else: st.caption("No active notifications. HARIS is monitoring autonomously.")
+    render_capability_matrix(result)
+
+
+def render_network_intelligence(result: Optional[Dict[str, Any]]) -> None:
+    st.markdown('### NETWORK INTELLIGENCE')
+    enabled = st.toggle("Geofencing Monitoring", value=bool(get_system().settings.geofencing_monitoring_enabled))
+    get_system().settings.geofencing_monitoring_enabled = enabled
+    st.caption("HARIS creates and cleans up geofence subscriptions only when policy and a playbook require it.")
+    render_environment(result)
+    render_prediction(result)
+    render_network_section(result)
+    geofence_events = [event for event in (result or {}).get("events", []) if "GEOFENCE" in event.get("message", "").upper()]
+    st.markdown('### GEOFENCE EVENTS')
+    if geofence_events: st.dataframe(geofence_events, use_container_width=True, hide_index=True)
+    else: st.caption("No Nokia geofence enter/exit event received.")
+
+
+def render_trusted_dispatch(result: Optional[Dict[str, Any]]) -> None:
+    st.markdown('### TRUSTED DISPATCH')
+    dispatch = (result or {}).get("trusted_dispatch") or get_system().latest_dispatch
+    if dispatch:
+        safe_status = {key: value for key, value in dispatch.items() if key != "authorization_url"}
+        st.json(safe_status)
+        if dispatch.get("status") == "WAITING_FOR_IDENTITY_VERIFICATION": st.warning("Awaiting consent-bound Nokia Number Verification; dispatch remains blocked.")
+        if dispatch.get("authorization_url"):
+            st.link_button("Open secure Nokia Number Verification", dispatch["authorization_url"], type="primary")
+    else: st.caption("No privileged field intervention is required. Routine remediation does not call Number Verification or SIM Swap.")
+
+
+def render_history_audit(result: Optional[Dict[str, Any]]) -> None:
+    render_history()
+    st.markdown('### LEARNED MEMORY')
+    st.json((result or {}).get("learning") or {"status": "No completed cycle in this session."})
 
 
 # ============================================================================
@@ -1639,51 +1677,26 @@ def render_playbook_and_feed(result: Optional[Dict[str, Any]]) -> None:
 # ============================================================================
 
 result = st.session_state.get("last_result")
-
-render_header(result)
-
-render_capability_matrix(result)
-
+render_status_bar(result)
+section = st.radio(
+    "HARIS CONSOLE", ["OVERVIEW", "NETWORK INTELLIGENCE", "AUTONOMOUS OPERATIONS", "TRUSTED DISPATCH", "HISTORY & AUDIT"],
+    horizontal=True, label_visibility="collapsed",
+)
 st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
 
-render_environment(result)
-
-render_prediction(result)
-
-st.markdown(
-    '<div class="hr"></div>',
-    unsafe_allow_html=True,
-)
-
-render_network_section(result)
-
-st.markdown(
-    '<div class="hr"></div>',
-    unsafe_allow_html=True,
-)
-
-render_impact(result)
-
-st.markdown(
-    '<div class="hr"></div>',
-    unsafe_allow_html=True,
-)
-
-render_decision_engine(result)
-
-st.markdown(
-    '<div class="hr"></div>',
-    unsafe_allow_html=True,
-)
-
-render_controls()
-
-st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
-
-render_history()
-
-st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
-render_playbook_and_feed(result)
+if section == "OVERVIEW":
+    render_overview(result)
+elif section == "NETWORK INTELLIGENCE":
+    render_network_intelligence(result)
+elif section == "AUTONOMOUS OPERATIONS":
+    render_controls()
+    render_decision_engine(result)
+    render_impact(result)
+    render_playbook_and_feed(result)
+elif section == "TRUSTED DISPATCH":
+    render_trusted_dispatch(result)
+elif section == "HISTORY & AUDIT":
+    render_history_audit(result)
 
 render_html(
     """

@@ -1,0 +1,28 @@
+{
+  "engineers": [
+    {
+      "engineer_id": "eng-demo-01",
+      "name": "Demo Field Engineer A",
+      "phone_number": "+99999991000",
+      "role": "field_engineer",
+      "skills": ["tower-inspection", "power"],
+      "region": "T03",
+      "site_coverage": ["T03"],
+      "availability": true,
+      "priority": 1,
+      "enabled": true
+    },
+    {
+      "engineer_id": "eng-demo-02",
+      "name": "Demo Field Engineer B",
+      "phone_number": "+99999991001",
+      "role": "field_engineer",
+      "skills": ["tower-inspection", "power"],
+      "region": "T03",
+      "site_coverage": ["T03"],
+      "availability": true,
+      "priority": 2,
+      "enabled": true
+    }
+  ]
+}

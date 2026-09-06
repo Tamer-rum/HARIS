@@ -5,15 +5,19 @@ from nokia_clients import app, build_nokia_client
 from scheduler import HarisScheduler
 
 _scheduler = None
+_system = None
 
 
 @app.on_event("startup")
 async def start_haris_scheduler():
-    global _scheduler
+    global _scheduler, _system
     settings = get_settings()
+    # The OAuth callback needs a server-owned continuation handler even when
+    # the periodic scheduler is disabled.
+    _system = HarisAgentSystem(build_nokia_client(settings), settings=settings)
     if settings.enable_continuous_loop:
         _scheduler = HarisScheduler(
-            HarisAgentSystem(build_nokia_client(settings), settings=settings), settings
+            _system, settings
         )
         await _scheduler.start()
 

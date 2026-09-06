@@ -11,8 +11,9 @@ from pydantic import BaseModel, Field
 from langgraph.graph import END, START, StateGraph
 
 from config import AppSettings, DevicePolicy, EnvironmentalSource, QualityLevel, get_settings
+from dispatch import AuthorizedEngineerRegistry, DispatchAttempt, PendingDispatch, mask_phone_number, pending_dispatches, trusted_dispatch_history
 from memory import IncidentMemory, MemoryStore
-from nokia_clients import BaseNokiaClient, CongestionReading, DeviceStatus, evaluate_trusted_dispatch_phone
+from nokia_clients import BaseNokiaClient, CongestionReading, DeviceStatus, evaluate_trusted_dispatch_phone, register_dispatch_resume_handler, start_number_verification_for_dispatch, verified_identities
 from playbooks import Action, PlaybookEngine
 from prediction import PredictionResult, RiskForecaster
 
@@ -84,7 +85,11 @@ class HarisState(TypedDict, total=False):
     trace: List[str]
     events: List[Dict[str, Any]]
     active_playbook: Dict[str, Any]
-    field_intervention_phone: Optional[str]
+    field_intervention_required: bool
+    field_intervention_site: Optional[str]
+    field_intervention_skills: List[str]
+    trusted_dispatch: Dict[str, Any]
+    explanation: str
     error: Optional[str]
     pre_execution_congestion: Dict[str, Dict[str, Any]]
     pre_execution_devices: Dict[str, str]
@@ -247,6 +252,9 @@ class HarisAgentSystem:
         self.tools = ToolFactory(client).build()
         self.reasoning = ReasoningRouter(self.settings)
         self.forecaster = RiskForecaster()
+        self.engineers = AuthorizedEngineerRegistry(self.settings.authorized_engineer_registry_path)
+        self.latest_dispatch: Dict[str, Any] = {}
+        register_dispatch_resume_handler(self._resume_pending_dispatch)
         self._cached_environment: Optional[bool] = None
         self.crewai_agents: Dict[str, Any] = {}
         self._init_crewai_agents()
@@ -594,12 +602,13 @@ class HarisAgentSystem:
 
             safe = all(checks.values())
 
-            # Only privileged field intervention triggers identity trust; routine
-            # autonomous network remediation never invokes it.
-            if state.get("field_intervention_phone"):
-                trust = await evaluate_trusted_dispatch_phone(state["field_intervention_phone"], self.settings)
+            # Only a typed physical-intervention requirement enters this branch.
+            # Routine autonomous QoD/geofence/slice remediation never reaches
+            # Number Verification or SIM Swap.
+            if state.get("field_intervention_required"):
+                trust = await self._evaluate_field_intervention(state)
                 state["trusted_dispatch"] = trust
-                self._trace(state, f"TRUST_CHECK: decision={trust['decision']}")
+                self._trace(state, f"TRUST_CHECK: decision={trust['decision']}; status={trust['status']}")
                 if trust["decision"] != "ALLOW":
                     safe = False
                     checks["trusted_dispatch_ok"] = False
@@ -833,6 +842,84 @@ class HarisAgentSystem:
         )
 
         return state
+
+    async def _evaluate_field_intervention(self, state: HarisState) -> Dict[str, Any]:
+        """Select an engineer deterministically and apply the existing trust gate.
+
+        Number Verification remains consent-bound: missing fresh server evidence
+        pauses the incident instead of inventing an approval or contacting Nokia.
+        A later callback records the receipt; a resumed cycle re-enters here.
+        """
+        incident = state.get("incident", {})
+        incident_id = incident.get("incident_id", state.get("cycle_id", "unknown"))
+        site = state.get("field_intervention_site") or (incident.get("affected_cells") or ["unknown"])[0]
+        skills = state.get("field_intervention_skills") or ["tower-inspection"]
+        attempted = {item.engineer_id for item in trusted_dispatch_history.for_incident(incident_id)}
+        candidates = [item for item in self.engineers.eligible(site=site, required_skills=skills) if item.engineer_id not in attempted]
+        candidates = candidates[:self.settings.trusted_dispatch_max_attempts]
+        if not candidates:
+            return {"decision": "BLOCK", "status": "NO_ELIGIBLE_ENGINEER", "reason": "No eligible authorised engineer is available.", "attempts": len(attempted)}
+
+        engineer = candidates[0]
+        base = {"engineer_id": engineer.engineer_id, "engineer_name": engineer.name, "masked_phone_number": mask_phone_number(engineer.phone_number), "site": site}
+        if not verified_identities.is_fresh(engineer.phone_number, self.settings.trusted_dispatch_verification_ttl_seconds):
+            pending = pending_dispatches.create(
+                incident_id=incident_id, engineer_id=engineer.engineer_id, phone_number=engineer.phone_number,
+                site=site, intervention_type="physical_inspection", ttl_seconds=self.settings.trusted_dispatch_verification_ttl_seconds,
+            )
+            trusted_dispatch_history.record(DispatchAttempt(
+                incident_id=incident_id, engineer_id=engineer.engineer_id,
+                masked_phone_number=mask_phone_number(engineer.phone_number), site=site,
+                intervention_type="physical_inspection", verification_status="WAITING_FOR_IDENTITY_VERIFICATION",
+                reason="Fresh Number Verification consent is required before dispatch.", final_dispatch_status="PENDING",
+            ))
+            try:
+                started = await start_number_verification_for_dispatch(pending, self.settings)
+                # The authorization URL is transient UI handoff only; it is not
+                # written to trace, memory, events, or audit.
+                self.latest_dispatch = {**base, "pending_id": pending.pending_id, "decision": "BLOCK", "status": "WAITING_FOR_IDENTITY_VERIFICATION", "number_verified": False, "recent_sim_swap": None, "reason": "Fresh Number Verification consent is required before dispatch.", "authorization_url": started["authorization_url"]}
+            except Exception:
+                pending_dispatches.complete(pending.pending_id, "BLOCKED")
+                self.latest_dispatch = {**base, "pending_id": pending.pending_id, "decision": "BLOCK", "status": "WAITING_FOR_IDENTITY_VERIFICATION", "number_verified": False, "recent_sim_swap": None, "reason": "Number Verification authorization is unavailable; dispatch remains fail-closed."}
+            return self.latest_dispatch
+
+        trust = await evaluate_trusted_dispatch_phone(engineer.phone_number, self.settings)
+        trusted_dispatch_history.record(DispatchAttempt(
+            incident_id=incident_id, engineer_id=engineer.engineer_id,
+            masked_phone_number=mask_phone_number(engineer.phone_number), site=site,
+            intervention_type="physical_inspection", verification_status="VERIFIED",
+            sim_swap_status=("RECENT_SWAP" if trust.get("recent_sim_swap") else "NO_RECENT_SWAP" if trust.get("recent_sim_swap") is False else "UNAVAILABLE"),
+            warden_decision=trust["decision"], reason=trust["reason"],
+            final_dispatch_status="APPROVED" if trust["decision"] == "ALLOW" else "BLOCKED",
+        ))
+        return {**base, **trust, "status": "APPROVED" if trust["decision"] == "ALLOW" else "BLOCKED"}
+
+    async def _resume_pending_dispatch(self, pending: PendingDispatch) -> None:
+        """Callback-only continuation after atomic OAuth-state consumption."""
+        trust = await evaluate_trusted_dispatch_phone(pending.phone_number, self.settings)
+        status = "APPROVED" if trust["decision"] == "ALLOW" else "BLOCKED"
+        pending_dispatches.complete(pending.pending_id, "COMPLETED" if status == "APPROVED" else "BLOCKED")
+        trusted_dispatch_history.record(DispatchAttempt(
+            incident_id=pending.incident_id, engineer_id=pending.engineer_id,
+            masked_phone_number=mask_phone_number(pending.phone_number), site=pending.site,
+            intervention_type=pending.intervention_type, verification_status="VERIFIED",
+            sim_swap_status=("RECENT_SWAP" if trust.get("recent_sim_swap") else "NO_RECENT_SWAP" if trust.get("recent_sim_swap") is False else "UNAVAILABLE"),
+            warden_decision=trust["decision"], reason=trust["reason"], final_dispatch_status=status,
+        ))
+        self.latest_dispatch = {"pending_id": pending.pending_id, "incident_id": pending.incident_id, "engineer_id": pending.engineer_id, "masked_phone_number": mask_phone_number(pending.phone_number), **trust, "status": status}
+        if status == "BLOCKED":
+            attempted = {item.engineer_id for item in trusted_dispatch_history.for_incident(pending.incident_id)}
+            candidates = [item for item in self.engineers.eligible(site=pending.site, required_skills=["tower-inspection"]) if item.engineer_id not in attempted]
+            if len(attempted) < self.settings.trusted_dispatch_max_attempts and candidates:
+                fallback = candidates[0]
+                next_pending = pending_dispatches.create(incident_id=pending.incident_id, engineer_id=fallback.engineer_id, phone_number=fallback.phone_number, site=pending.site, intervention_type=pending.intervention_type, ttl_seconds=self.settings.trusted_dispatch_verification_ttl_seconds)
+                try:
+                    started = await start_number_verification_for_dispatch(next_pending, self.settings)
+                    self.latest_dispatch = {"pending_id": next_pending.pending_id, "incident_id": pending.incident_id, "engineer_id": fallback.engineer_id, "engineer_name": fallback.name, "masked_phone_number": mask_phone_number(fallback.phone_number), "decision": "BLOCK", "status": "WAITING_FOR_IDENTITY_VERIFICATION", "fallback_from": pending.engineer_id, "reason": "Previous engineer blocked; awaiting fallback engineer consent.", "authorization_url": started["authorization_url"]}
+                except Exception:
+                    pending_dispatches.complete(next_pending.pending_id, "BLOCKED")
+            else:
+                self.latest_dispatch["status"] = "MANUAL_INTERVENTION_REQUIRED"
 
     async def _cartographer(self, state: HarisState) -> HarisState:
         device_ids = state.get(
@@ -1644,7 +1731,11 @@ class HarisAgentSystem:
         elif verification_status == "execution_failed":
             state["final_status"] = "execution_failed"
         elif verification_status == "warden_rejected":
-            state["final_status"] = "warden_rejected"
+            state["final_status"] = (
+                "waiting_for_identity_verification"
+                if state.get("trusted_dispatch", {}).get("status") == "WAITING_FOR_IDENTITY_VERIFICATION"
+                else "warden_rejected"
+            )
         elif verification_status == "verification_unavailable":
             state["final_status"] = "verification_unavailable"
         elif level_degraded:
@@ -2107,10 +2198,13 @@ class HarisAgentSystem:
                 "crew_advisory": state.get("crew_advisory", {}),
                 "plan": plan,
                 "warden": state.get("warden", {}),
+                "trusted_dispatch": state.get("trusted_dispatch", {}),
+                "dispatch_history": [item.model_dump() for item in trusted_dispatch_history.for_incident(incident.incident_id)],
                 "execution": execution,
                 "verification": verification,
                 "rollback": rollback,
                 "trace": state.get("trace", []),
+                "events": state.get("events", []),
                 "final_status": state.get("final_status"),
             },
 
@@ -2126,6 +2220,8 @@ class HarisAgentSystem:
             "outcome": outcome,
         }
 
+        state["explanation"] = self._explain_cycle(state)
+
         self._trace(
             state,
             (
@@ -2137,13 +2233,38 @@ class HarisAgentSystem:
 
         return state
 
-    async def run_cycle(self, dust_advisory: bool = True) -> HarisState:
+    def _explain_cycle(self, state: HarisState) -> str:
+        """Concise explanation grounded solely in recorded cycle evidence."""
+        incident = state.get("incident", {})
+        source = state.get("environmental_source", "UNAVAILABLE")
+        simulated = " Simulated fixture evidence was used." if self.settings.nac_mode == "fixture" or source == "FIXTURE" else ""
+        playbook = state.get("active_playbook", {}).get("name", "No playbook")
+        actions = state.get("execution", {}).get("actions", [])
+        action_text = ", ".join(item.get("kind", "action") for item in actions) or "no network action"
+        return (
+            f"HARIS observed {incident.get('peak_congestion_level', 'unavailable')} congestion "
+            f"at {', '.join(incident.get('affected_cells', [])) or 'no affected registered cell'}, "
+            f"selected {playbook}, and WARDEN completed the cycle with {state.get('final_status', 'unknown')}. "
+            f"Executed: {action_text}." + simulated
+        )
+
+    async def run_cycle(
+        self,
+        dust_advisory: bool = True,
+        *,
+        field_intervention_required: bool = False,
+        field_intervention_site: Optional[str] = None,
+        field_intervention_skills: Optional[List[str]] = None,
+    ) -> HarisState:
        
         initial: HarisState = {
             "cycle_id": uuid.uuid4().hex[:10],
             "dust_advisory": dust_advisory,
             "trace": [],
             "events": [],
+            "field_intervention_required": field_intervention_required,
+            "field_intervention_site": field_intervention_site,
+            "field_intervention_skills": field_intervention_skills or [],
         }
 
         result = await self.graph.ainvoke(initial)

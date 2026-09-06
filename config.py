@@ -182,6 +182,7 @@ class AppSettings(BaseSettings):
     cycle_seconds: int = 60
     enable_continuous_loop: bool = False
     enable_live_write_loop: bool = False
+    geofencing_monitoring_enabled: bool = True
 
     nac_mode: str = "fixture"
     rollback_test_mode: bool = False
@@ -206,6 +207,11 @@ class AppSettings(BaseSettings):
     trusted_dispatch_verification_ttl_seconds: int = Field(default=300, ge=1, le=3600)
     # Nokia SDK Device.verify_sim_swap(max_age) expects hours, not seconds.
     trusted_dispatch_sim_swap_max_age_hours: int = Field(default=240, ge=1)
+    # Registry data is operational policy, never client supplied.  The fixture
+    # registry deliberately contains demo-only contacts; production must point
+    # this at an access-controlled source of authorised engineer records.
+    authorized_engineer_registry_path: str = "fixtures/authorized_engineers.json"
+    trusted_dispatch_max_attempts: int = Field(default=3, ge=1, le=10)
 
     gemini_api_key: Optional[SecretStr] = None
     groq_api_key: Optional[SecretStr] = None
