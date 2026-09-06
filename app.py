@@ -65,9 +65,36 @@ def authoritative_haris_state(result: Optional[Dict[str, Any]], supervisory: Opt
         "READY",
     )
 
+
+def presentation_mode_label() -> str:
+    """Compact truthful label that does not clip on the judge-facing header."""
+    return {
+        "fixture": "FIXTURE / DEMO",
+        "live_read_only": "LIVE / READ-ONLY",
+        "live_write": "LIVE / WRITE ENABLED",
+    }.get(settings.nac_mode, safe_upper(settings.nac_mode, "UNKNOWN"))
+
+
+def overview_notifications(result: Optional[Dict[str, Any]], supervisory: Optional[Dict[str, Any]] = None) -> List[Tuple[str, str, str]]:
+    """Concise, evidence-derived overview notices; detailed traces stay elsewhere."""
+    cycle, supervisory = safe_mapping(result), safe_mapping(supervisory)
+    dispatch = safe_mapping(cycle.get("trusted_dispatch"))
+    attempts = supervisory.get("dispatch_history") or cycle.get("dispatch_history") or []
+    notices: List[Tuple[str, str, str]] = []
+    blocked = next((safe_mapping(item) for item in reversed(attempts)
+                    if safe_mapping(item).get("sim_swap_status") == "RECENT_SWAP"
+                    and safe_mapping(item).get("warden_decision") == "BLOCK"), None)
+    if blocked:
+        notices.append(("danger", "SECURITY ALERT", "Recent SIM swap detected — field engineer blocked by WARDEN."))
+    if dispatch.get("fallback_from"):
+        notices.append(("warning", "AUTOMATIC FALLBACK", "Fallback engineer selected automatically after the previous engineer was blocked."))
+    if dispatch.get("status") == "WAITING_FOR_IDENTITY_VERIFICATION":
+        notices.append(("warning", "ACTION REQUIRED", "Awaiting secure Nokia Number Verification consent for the selected engineer."))
+    return notices
+
 st.set_page_config(
     page_title="HARIS — Network Resilience",
-    page_icon="🛡️",
+    page_icon="H",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
@@ -104,6 +131,8 @@ st.markdown(
         linear-gradient(180deg, #060a10 0%, #080d14 100%);
     color: var(--text);
     font-family: Inter, sans-serif;
+    perspective: 1400px;
+    transform-style: preserve-3d;
 }
 
 .block-container {
@@ -168,8 +197,15 @@ button[kind="primary"] {
 }
 
 .shield {
-    font-size: 2.55rem;
-    filter: drop-shadow(0 0 13px rgba(49,215,255,.40));
+    width: 38px;
+    height: 38px;
+    display: grid;
+    place-items: center;
+    border: 1px solid rgba(49,215,255,.65);
+    border-radius: 10px;
+    color: var(--cyan);
+    font: 800 1.1rem/1 "JetBrains Mono", monospace;
+    box-shadow: 0 0 16px rgba(49,215,255,.20), inset 0 0 12px rgba(49,215,255,.05);
 }
 
 .brand-name {
@@ -402,6 +438,45 @@ button[kind="primary"] {
     color: #a9bfd4;
 }
 
+/* Presentation-only command-console refinements. Audit/JSON/table content
+   intentionally remains selectable and copy-friendly. */
+[data-testid="stMetric"], .panel, .kpi-card, .hero {
+    transform-style: preserve-3d;
+    will-change: transform, box-shadow;
+    transition: transform 190ms cubic-bezier(.2,.7,.2,1), border-color 190ms ease, box-shadow 190ms ease;
+}
+[data-testid="stMetric"]:hover, .panel:hover, .kpi-card:hover, .hero:hover {
+    transform: translateZ(8px) scale(1.006);
+    border-color: rgba(49,215,255,.42);
+    box-shadow: 0 18px 32px rgba(0,0,0,.42), 0 10px 28px rgba(49,215,255,.13), 0 0 22px rgba(49,215,255,.10);
+}
+div[data-testid="stButton"] button {
+    transition: transform 180ms ease, border-color 180ms ease, box-shadow 180ms ease, filter 180ms ease;
+    border: 1px solid rgba(49,215,255,.24);
+}
+div[data-testid="stButton"] button:hover {
+    transform: translateZ(4px) scale(1.004);
+    border-color: rgba(49,215,255,.70);
+    box-shadow: 0 10px 20px rgba(0,0,0,.32), 0 0 17px rgba(49,215,255,.18);
+    filter: brightness(1.07);
+}
+div[role="radiogroup"] { gap: 1.15rem; border-bottom: 1px solid rgba(49,215,255,.14); padding: 0 .15rem .28rem; }
+div[role="radiogroup"] label {
+    background: transparent !important; border: 0 !important; border-radius: 0 !important;
+    color: #7890aa !important; padding: .38rem 0 !important; font-size: .68rem !important;
+    font-weight: 800 !important; letter-spacing: .07em; transition: color 180ms ease, text-shadow 180ms ease;
+}
+div[role="radiogroup"] label:hover { color: #eaf8ff !important; text-shadow: 0 0 10px rgba(49,215,255,.34); }
+div[role="radiogroup"] label:has(input:checked) { color: #57dcff !important; box-shadow: inset 0 -2px 0 #31d7ff; }
+.brand, .hero, .section-title, .panel-title, [data-testid="stMetric"] { user-select: none; cursor: default; }
+.status-card { border: 1px solid #1c3146; background: linear-gradient(135deg, rgba(13,28,42,.94), rgba(7,14,23,.94)); border-radius: 12px; padding: 12px 14px; min-height: 82px; }
+.status-label { color:#7890aa; font-size:.60rem; letter-spacing:.12em; font-weight:800; text-transform:uppercase; }
+.status-value { color:#eef8ff; font-size:1rem; font-weight:800; margin-top:7px; overflow-wrap:anywhere; }
+.notice { border-left: 3px solid #31d7ff; background: rgba(15,31,46,.65); border-radius: 8px; padding: 10px 12px; margin: 7px 0; font-size:.75rem; }
+.notice.warning { border-left-color:#ffc857; }.notice.danger { border-left-color:#ff4d5f; }.notice.success { border-left-color:#42f59b; }
+.section-mark { color:var(--cyan); font-size:.72rem; margin-right:.38rem; }.section-mark.warning { color:var(--yellow); }
+@media (max-width: 900px) { div[role="radiogroup"] { gap:.55rem; flex-wrap:wrap; } div[role="radiogroup"] label { font-size:.59rem !important; } .brand-sub { display:none; } }
+
 div[data-testid="stAlert"] {
     border-radius: 10px;
 }
@@ -598,7 +673,7 @@ def render_header(result: Optional[Dict[str, Any]], supervisory: Optional[Dict[s
         render_html(
             """
             <div class="brand">
-                <div class="shield">🛡️</div>
+                <div class="shield">H</div>
                 <div>
                     <div class="brand-name">HARIS</div>
                     <div class="brand-sub">
@@ -615,8 +690,7 @@ def render_header(result: Optional[Dict[str, Any]], supervisory: Optional[Dict[s
             f"""
             <div class="live-pill">
                 <span class="live-dot"></span>
-                {settings.operating_mode_label} ·
-                NETWORK FABRIC · LIVE
+                {presentation_mode_label()} · NETWORK FABRIC
             </div>
             """
         )
@@ -634,27 +708,9 @@ def render_header(result: Optional[Dict[str, Any]], supervisory: Optional[Dict[s
 
     st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
 
-    a, b, c, d = st.columns(4)
-
-    a.metric(
-        "Closed Loop",
-        f"{settings.cycle_seconds}s",
-    )
-
-    b.metric(
-        "Target Mitigation",
-        "< 3 min",
-    )
-
-    c.metric(
-        "Network Capabilities",
-        "7",
-    )
-
-    d.metric(
-        "NaC Mode",
-        settings.operating_mode_label,
-    )
+    a, b = st.columns(2)
+    a.metric("Network Capabilities", "7", help="Architectural capability count, not a live KPI.")
+    b.metric("NAC Mode", presentation_mode_label())
 
     if settings.nac_mode == "live_read_only":
         st.info(
@@ -690,7 +746,7 @@ def render_capability_matrix(result: Optional[Dict[str, Any]]) -> None:
         "SDK_UNSUPPORTED": "UNAVAILABLE",
         "PRIVILEGED_ONLY": "PRIVILEGED ONLY",
     }
-    st.markdown('<div class="section-title">🧩 <span>LIVE CAPABILITY MATRIX</span></div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title"><span class="section-mark">●</span><span>LIVE CAPABILITY MATRIX</span></div>', unsafe_allow_html=True)
     columns = st.columns(3)
     for index, (key, label) in enumerate(labels):
         item = report.get(key, {"status": "PRIVILEGED_ONLY", "reason": "Number Verification + SIM Swap; privileged field intervention only."})
@@ -705,7 +761,7 @@ def render_environment(result: Optional[Dict[str, Any]]) -> None:
     source = (result or {}).get("environmental_source", "FIXTURE" if settings.nac_mode == "fixture" else "UNAVAILABLE")
     st.caption(f"ENVIRONMENT SOURCE: {source}")
     st.markdown(
-        '<div class="section-title">🌪 <span>ENVIRONMENTAL THREAT STATE</span></div>',
+        '<div class="section-title"><span class="section-mark warning">△</span><span>ENVIRONMENTAL THREAT STATE</span></div>',
         unsafe_allow_html=True,
     )
 
@@ -715,7 +771,7 @@ def render_prediction(result: Optional[Dict[str, Any]]) -> None:
     if not prediction:
         return
     prediction = safe_mapping(prediction)
-    st.markdown('<div class="section-title">🔮 <span>SHORT-HORIZON RISK FORECAST</span></div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title"><span class="section-mark">●</span><span>SHORT-HORIZON RISK FORECAST</span></div>', unsafe_allow_html=True)
     a, b, c, d = st.columns(4)
     a.metric("Predicted Risk", safe_upper(prediction.get("predicted_risk_level"), "N/A"))
     b.metric("Forecast Horizon", f"{prediction.get('horizon_minutes', 'N/A')} min")
@@ -1069,7 +1125,7 @@ def render_network_section(
 
     with left:
         st.markdown(
-            '<div class="section-title">⚠ <span>NETWORK ALERTS</span></div>',
+            '<div class="section-title"><span class="section-mark warning">△</span><span>NETWORK ALERTS</span></div>',
             unsafe_allow_html=True,
         )
 
@@ -1106,7 +1162,7 @@ def render_network_section(
         st.markdown('<div style="height:10px"></div>', unsafe_allow_html=True)
 
         st.markdown(
-            '<div class="section-title">📡 <span>CRITICAL DEVICES</span></div>',
+            '<div class="section-title"><span class="section-mark">●</span><span>CRITICAL DEVICES</span></div>',
             unsafe_allow_html=True,
         )
 
@@ -1148,7 +1204,7 @@ def render_network_section(
 
     with right:
         st.markdown(
-            '<div class="section-title">🗺 <span>NETWORK TOPOLOGY</span></div>',
+            '<div class="section-title"><span class="section-mark">●</span><span>NETWORK TOPOLOGY</span></div>',
             unsafe_allow_html=True,
         )
 
@@ -1168,7 +1224,7 @@ def render_impact(
     result: Optional[Dict[str, Any]],
 ) -> None:
     st.markdown(
-        '<div class="section-title">📈 <span>LIVE MITIGATION IMPACT</span></div>',
+        '<div class="section-title"><span class="section-mark">●</span><span>LIVE MITIGATION IMPACT</span></div>',
         unsafe_allow_html=True,
     )
 
@@ -1322,7 +1378,7 @@ def render_decision_engine(
     result: Optional[Dict[str, Any]],
 ) -> None:
     st.markdown(
-        '<div class="section-title">🧠 <span>AI DECISION ENGINE</span></div>',
+        '<div class="section-title"><span class="section-mark">●</span><span>AI DECISION ENGINE</span></div>',
         unsafe_allow_html=True,
     )
 
@@ -1345,14 +1401,20 @@ def render_decision_engine(
     warden = safe_mapping(result.get("warden"))
     rollback = safe_mapping(result.get("rollback"))
     read_only = execution.get("reason") == "live_read_only"
+    identity_pending = (
+        verification.get("status") == "identity_verification_pending"
+        or result.get("final_status") == "waiting_for_identity_verification"
+    )
     actuator_detail = (
-        "Not executed — live read-only mode"
+        "Paused — awaiting authorization" if identity_pending
+        else "Not executed — live read-only mode"
         if read_only
         else "Network actions executed" if execution.get("executed")
         else f"Not executed — {execution.get('reason', 'no action')}"
     )
     verify_detail = (
-        "Not applicable — no mutation was executed"
+        "Deferred — no network mutation" if identity_pending
+        else "Not applicable — no mutation was executed"
         if read_only
         else "Post-action network readback" if execution.get("executed")
         else "Not applicable — no action executed"
@@ -1380,7 +1442,8 @@ def render_decision_engine(
         (
             "04",
             "WARDEN",
-            "Approved" if warden.get("verified") else "Capability or policy blocked execution",
+            "Identity/trust authorization pending" if identity_pending
+            else "Approved" if warden.get("verified") else "Capability or policy blocked execution",
             bool(warden.get("verified")),
         ),
         (
@@ -1404,8 +1467,8 @@ def render_decision_engine(
         (
             "08",
             "LEARN",
-            "Incident stored",
-            bool(learning.get("incident_saved")),
+            "Workflow checkpoint stored" if identity_pending else "Incident stored",
+            bool(learning.get("incident_saved")) or identity_pending,
         ),
     ]
 
@@ -1415,7 +1478,7 @@ def render_decision_engine(
         html = '<div class="panel">'
 
         for number, stage, detail, success in stages:
-            skipped = (read_only and stage in {"ACTUATOR", "VERIFY"}) or (
+            skipped = (identity_pending and stage in {"WARDEN", "ACTUATOR", "VERIFY"}) or (read_only and stage in {"ACTUATOR", "VERIFY"}) or (
                 stage == "ROLLBACK" and detail == "Not required"
             )
             color = "#42f59b" if success else "#ffc857" if skipped else "#ff6170"
@@ -1585,7 +1648,7 @@ def render_trace(trace: List[str]) -> None:
 
 def render_controls() -> None:
     st.markdown(
-        '<div class="section-title">🎛 <span>OPERATIONS CONTROL</span></div>',
+        '<div class="section-title"><span class="section-mark">●</span><span>OPERATIONS CONTROL</span></div>',
         unsafe_allow_html=True,
     )
 
@@ -1593,7 +1656,7 @@ def render_controls() -> None:
 
     with a:
         if st.button(
-            "🛡️ RUN AUTONOMOUS HARIS",
+            "RUN AUTONOMOUS HARIS",
             use_container_width=True,
             type="primary",
         ):
@@ -1676,7 +1739,7 @@ def render_controls() -> None:
 
 
 def render_history(supervisory: Optional[Dict[str, Any]] = None) -> None:
-    st.markdown('<div class="section-title">📜 <span>INCIDENT HISTORY / REPLAY</span></div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title"><span class="section-mark">●</span><span>INCIDENT HISTORY / REPLAY</span></div>', unsafe_allow_html=True)
     backend_audit = (supervisory or {}).get("audit") if settings.haris_backend_url else None
     if backend_audit is not None:
         records = backend_audit.get("records", [])
@@ -1697,17 +1760,17 @@ def render_history(supervisory: Optional[Dict[str, Any]] = None) -> None:
 
 
 def render_playbook_and_feed(result: Optional[Dict[str, Any]]) -> None:
-    st.markdown('<div class="section-title">📋 <span>ACTIVE PLAYBOOK</span></div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title"><span class="section-mark">●</span><span>ACTIVE PLAYBOOK</span></div>', unsafe_allow_html=True)
     cycle = safe_mapping(result)
     playbook = safe_mapping(cycle.get("active_playbook"))
     st.json(playbook or {"name": "N/A", "state": "IDLE", "latest_outcome": "N/A"})
-    st.markdown('<div class="section-title">📰 <span>INCIDENT FEED</span></div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title"><span class="section-mark">●</span><span>INCIDENT FEED</span></div>', unsafe_allow_html=True)
     events = cycle.get("events") or []
     if events: st.dataframe(events, use_container_width=True, hide_index=True)
     else: st.caption("No incident events yet.")
     dispatch = safe_mapping(cycle.get("trusted_dispatch"))
     if dispatch:
-        st.markdown('<div class="section-title">👷 <span>FIELD INTERVENTION / TRUSTED DISPATCH</span></div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-title"><span class="section-mark">●</span><span>FIELD INTERVENTION / TRUSTED DISPATCH</span></div>', unsafe_allow_html=True)
         st.json(dispatch)
 
 
@@ -1735,16 +1798,23 @@ def render_overview(result: Optional[Dict[str, Any]], supervisory: Optional[Dict
     incident = safe_mapping(safe_mapping(supervisory).get("active_incident") or cycle.get("incident"))
     prediction, warden = safe_mapping(cycle.get("prediction")), safe_mapping(cycle.get("warden"))
     cols = st.columns(5)
-    cols[0].metric("Backend Health", "HEALTHY")
-    cols[1].metric("Nokia Integration", get_system().client.name.upper())
-    cols[2].metric("WARDEN", "APPROVED" if warden.get("verified") else "STANDING BY")
-    cols[3].metric("Active Incident", incident.get("incident_id", "None"))
-    cols[4].metric("Predicted Risk", safe_upper(prediction.get("predicted_risk_level"), "Monitoring"))
-    st.markdown('### IMPORTANT NOTIFICATIONS')
-    events = (cycle.get("events") or [])[-6:]
-    if events:
-        for event in reversed(events): st.info(safe_mapping(event).get("message") or "HARIS event")
-    else: st.caption("No active notifications. HARIS is monitoring autonomously.")
+    cards = [
+        ("Backend Health", "HEALTHY"),
+        ("Nokia Integration", get_system().client.name.upper()),
+        ("WARDEN", "APPROVED" if warden.get("verified") else "REVIEW"),
+        ("Active Incident", incident.get("incident_id") or "NONE"),
+        ("Predicted Risk", safe_upper(prediction.get("predicted_risk_level"), "MONITORING")),
+    ]
+    for column, (label, value) in zip(cols, cards):
+        with column:
+            render_html(f'<div class="status-card"><div class="status-label">{label}</div><div class="status-value">{value}</div></div>')
+    st.markdown('### OPERATIONAL NOTIFICATIONS')
+    notices = overview_notifications(cycle, supervisory)
+    if notices:
+        for tone, title, message in notices:
+            render_html(f'<div class="notice {tone}"><b>{title}</b><br>{message}</div>')
+    else:
+        st.caption("No authoritative security or incident notification is active.")
     render_capability_matrix(result)
 
 

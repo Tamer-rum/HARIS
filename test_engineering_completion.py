@@ -215,6 +215,27 @@ class EngineeringCompletionTests(unittest.TestCase):
         self.assertEqual(app.authoritative_haris_state({"final_status": "mitigated"}, {}), "MITIGATED")
         self.assertEqual(app.authoritative_haris_state({"final_status": "rolled_back_safely"}, {}), "ROLLED_BACK_SAFELY")
 
+    def test_overview_notifications_require_dispatch_evidence_and_pending_semantics(self):
+        import app
+        self.assertEqual(app.overview_notifications({}, {}), [])
+        cycle = {
+            "final_status": "waiting_for_identity_verification",
+            "trusted_dispatch": {
+                "status": "WAITING_FOR_IDENTITY_VERIFICATION",
+                "fallback_from": "eng-demo-01",
+            },
+        }
+        supervisory = {
+            "dispatch_history": [{
+                "engineer_id": "eng-demo-01", "sim_swap_status": "RECENT_SWAP",
+                "warden_decision": "BLOCK",
+            }],
+        }
+        notices = app.overview_notifications(cycle, supervisory)
+        self.assertEqual([item[1] for item in notices], ["SECURITY ALERT", "AUTOMATIC FALLBACK", "ACTION REQUIRED"])
+        self.assertIn("Recent SIM swap", notices[0][2])
+        self.assertIn("Awaiting secure Nokia", notices[-1][2])
+
     def test_api_startup_is_lazy_when_scheduler_disabled(self):
         import run_api
         run_api._system = None
