@@ -63,6 +63,23 @@ class EngineeringCompletionTests(unittest.TestCase):
             self.assertEqual(client.post("/api/nac/callbacks/nokia/geofence", json={"type": "org.camaraproject.geofencing-subscriptions.v0.area-entered"}).status_code, 200)
             self.assertEqual(client.post("/api/nac/callbacks/nokia/geofence", json={"type": "unexpected"}).status_code, 422)
 
+    def test_custom_swagger_docs_are_presentational_and_openapi_stays_intact(self):
+        """The engineering UI must not add or alter public API operations."""
+        with TestClient(app) as client:
+            docs = client.get("/docs")
+            schema = client.get("/openapi.json")
+
+        self.assertEqual(docs.status_code, 200)
+        self.assertIn("HARIS Backend API / Engineering Interface", docs.text)
+        self.assertIn("Engineering API Documentation", docs.text)
+        self.assertIn("/openapi.json", docs.text)
+        self.assertIn("opblock-get", docs.text)
+        self.assertIn("opblock-post", docs.text)
+        self.assertEqual(schema.status_code, 200)
+        paths = schema.json()["paths"]
+        self.assertIn("/api/nac/health", paths)
+        self.assertNotIn("/docs", paths)
+
     def test_scheduler_prevents_duplicate_start_and_survives_cycle_failure(self):
         class FakeSystem:
             def __init__(self): self.calls = 0
@@ -196,9 +213,9 @@ class EngineeringCompletionTests(unittest.TestCase):
             "audit": {"chain": {"valid": True, "records": 0}, "records": []},
         }
         fake = FakeSystem()
-        with patch.object(app, "get_system", return_value=fake), patch.object(app.st, "caption") as caption:
+        with patch.object(app, "get_system", return_value=fake), patch.object(app, "render_html") as render_html:
             app.render_status_bar(cycle, supervisory)
-            rendered = " ".join(str(call.args[0]) for call in caption.call_args_list if call.args)
+            rendered = " ".join(str(call.args[0]) for call in render_html.call_args_list if call.args)
             self.assertIn("WAITING_FOR_IDENTITY_VERIFICATION", rendered)
             self.assertIn("inc-wait", rendered)
             # Exercise all five supervisory sections with the same nullable

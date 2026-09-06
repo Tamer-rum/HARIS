@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import logging
 import math
@@ -51,6 +52,35 @@ def safe_mapping(value: Any) -> Dict[str, Any]:
 def safe_upper(value: Any, fallback: str) -> str:
     """Format optional API strings without displaying a literal ``None``."""
     return str(value or fallback).upper()
+
+
+def safe_text(value: Any, fallback: str = "N/A") -> str:
+    """Escape presentation values without changing their source or meaning."""
+    return html.escape(str(value or fallback))
+
+
+def semantic_tone(value: Any) -> str:
+    """Map authoritative status text to a presentation-only semantic colour."""
+    state = safe_upper(value, "NEUTRAL")
+    if any(token in state for token in ("BLOCK", "CRITICAL", "FAILED", "DENIED", "ROLL", "UNAVAILABLE")):
+        return "danger"
+    if any(token in state for token in ("WAIT", "PENDING", "REVIEW", "RISK", "WARNING", "AT RISK")):
+        return "warning"
+    if any(token in state for token in ("READY", "HEALTHY", "VERIFIED", "APPROVED", "MITIGATED", "CONNECTED", "OPERATING")):
+        return "success"
+    return "neutral"
+
+
+def operational_card(label: str, value: Any, detail: Any = None, tone: Optional[str] = None) -> str:
+    """Reusable custom status panel for authoritative console state."""
+    card_tone = tone or semantic_tone(value)
+    symbol = {"success": "&#10003;", "warning": "&#9651;", "danger": "&#215;", "neutral": "&#9679;"}.get(card_tone, "&#9679;")
+    detail_html = f'<div class="ops-card-detail">{safe_text(detail, "")}</div>' if detail else ""
+    return (
+        f'<div class="ops-card {card_tone}">'
+        f'<div class="ops-card-label"><span class="ops-card-symbol">{symbol}</span>{safe_text(label)}</div>'
+        f'<div class="ops-card-value">{safe_text(value)}</div>{detail_html}</div>'
+    )
 
 
 def authoritative_haris_state(result: Optional[Dict[str, Any]], supervisory: Optional[Dict[str, Any]] = None) -> str:
@@ -438,18 +468,17 @@ button[kind="primary"] {
     color: #a9bfd4;
 }
 
-/* Presentation-only command-console refinements. Audit/JSON/table content
-   intentionally remains selectable and copy-friendly. */
-[data-testid="stMetric"], .panel, .kpi-card, .hero {
-    transform-style: preserve-3d;
-    will-change: transform, box-shadow;
-    transition: transform 190ms cubic-bezier(.2,.7,.2,1), border-color 190ms ease, box-shadow 190ms ease;
-}
-[data-testid="stMetric"]:hover, .panel:hover, .kpi-card:hover, .hero:hover {
-    transform: translateZ(8px) scale(1.006);
-    border-color: rgba(49,215,255,.42);
-    box-shadow: 0 18px 32px rgba(0,0,0,.42), 0 10px 28px rgba(49,215,255,.13), 0 0 22px rgba(49,215,255,.10);
-}
+/* Presentation-only command-console system. Audit/JSON/table content remains
+   selectable and copy-friendly; these rules never alter application state. */
+.stApp::before { content:""; position:fixed; inset:0; z-index:-1; pointer-events:none; opacity:.22; background-image:linear-gradient(rgba(49,215,255,.055) 1px,transparent 1px),linear-gradient(90deg,rgba(49,215,255,.04) 1px,transparent 1px); background-size:72px 72px; mask-image:linear-gradient(to bottom,black,transparent 72%); }
+.command-header { position:relative; overflow:hidden; display:grid; grid-template-columns:minmax(290px,1.6fr) minmax(500px,2.4fr); gap:26px; margin:0 0 17px; padding:23px 24px 20px; border:1px solid rgba(49,215,255,.32); border-radius:16px; background:radial-gradient(circle at 88% 8%,rgba(49,215,255,.15),transparent 29%),linear-gradient(135deg,rgba(12,29,45,.98),rgba(6,12,20,.98)); box-shadow:inset 0 1px 0 rgba(255,255,255,.04),0 17px 40px rgba(0,0,0,.28),0 0 34px rgba(49,215,255,.08); }
+.command-header::after { content:""; position:absolute; left:24px; right:24px; bottom:0; height:1px; background:linear-gradient(90deg,transparent,rgba(49,215,255,.75),transparent); }
+.command-kicker { color:#68dcf9; font-size:.61rem; font-weight:800; letter-spacing:.18em; }.command-brand { display:flex; align-items:center; gap:13px; margin-top:8px; }.command-mark { width:44px; height:44px; display:grid; place-items:center; border:1px solid #45dcff; border-radius:11px; color:#dff8ff; font:800 1.25rem/1 "JetBrains Mono",monospace; box-shadow:inset 0 0 16px rgba(49,215,255,.12),0 0 19px rgba(49,215,255,.23); }.command-name { color:#f1faff; font-size:2.15rem; font-weight:800; letter-spacing:-.055em; line-height:.9; }.command-subtitle { margin-top:7px; color:#9ab0c5; font-size:.72rem; line-height:1.45; }.command-states { align-self:end; display:grid; grid-template-columns:repeat(5,minmax(82px,1fr)); border-left:1px solid rgba(49,215,255,.14); }.command-state { min-height:60px; padding:4px 11px 4px 15px; border-right:1px solid rgba(49,215,255,.14); }.command-state:last-child { border-right:0; }.command-state-label { color:#7290a8; font-size:.55rem; font-weight:800; letter-spacing:.12em; white-space:nowrap; }.command-state-value { margin-top:9px; color:#e9f7ff; font-size:.75rem; font-weight:800; overflow-wrap:anywhere; }.command-state.success .command-state-value { color:#5af1af; }.command-state.warning .command-state-value { color:#ffd06a; }.command-state.danger .command-state-value { color:#ff6978; }.command-state.neutral .command-state-value { color:#6fdaff; }
+.overview-banner { display:flex; align-items:flex-end; justify-content:space-between; gap:20px; padding:5px 2px 16px; }.overview-banner-title { color:#edf8ff; font-size:1.25rem; font-weight:800; letter-spacing:.02em; }.overview-banner-detail { color:#7591a8; font-size:.71rem; max-width:640px; text-align:right; line-height:1.45; }
+.ops-card { position:relative; isolation:isolate; min-height:110px; overflow:hidden; padding:14px 15px; border:1px solid #244055; border-radius:13px; background:linear-gradient(145deg,rgba(16,31,45,.98),rgba(7,14,23,.98)); box-shadow:inset 0 1px 0 rgba(255,255,255,.03); transform-style:preserve-3d; will-change:transform,box-shadow; transition:transform 210ms cubic-bezier(.18,.72,.2,1),border-color 210ms ease,box-shadow 210ms ease; }
+.ops-card::before { content:""; position:absolute; inset:auto 12px -19px; height:34px; z-index:-1; opacity:0; filter:blur(15px); background:rgba(49,215,255,.52); transition:opacity 210ms ease; }.ops-card:hover { transform:translateZ(15px) scale(1.018); border-color:rgba(78,224,255,.85); box-shadow:0 26px 38px rgba(0,0,0,.48),0 14px 36px rgba(49,215,255,.23),inset 0 1px 0 rgba(255,255,255,.08); }.ops-card:hover::before { opacity:.72; }.ops-card.success { border-color:rgba(66,245,155,.38); }.ops-card.success::before { background:rgba(66,245,155,.44); }.ops-card.warning { border-color:rgba(255,200,87,.42); }.ops-card.warning::before { background:rgba(255,200,87,.44); }.ops-card.danger { border-color:rgba(255,77,95,.48); }.ops-card.danger::before { background:rgba(255,77,95,.46); }.ops-card-label { color:#88a2b8; font-size:.59rem; font-weight:800; letter-spacing:.12em; text-transform:uppercase; }.ops-card-symbol { margin-right:7px; color:#5de3ff; font-size:.75rem; }.ops-card.success .ops-card-symbol,.ops-card.success .ops-card-value { color:#5af1af; }.ops-card.warning .ops-card-symbol,.ops-card.warning .ops-card-value { color:#ffd06a; }.ops-card.danger .ops-card-symbol,.ops-card.danger .ops-card-value { color:#ff6e7c; }.ops-card-value { margin-top:13px; color:#edf8ff; font-size:1.06rem; font-weight:800; letter-spacing:.01em; overflow-wrap:anywhere; }.ops-card-detail { margin-top:7px; color:#7691a9; font-size:.64rem; line-height:1.35; }
+[data-testid="stMetric"], .panel, .kpi-card, .hero, .status-card { transform-style:preserve-3d; will-change:transform,box-shadow; transition:transform 210ms cubic-bezier(.18,.72,.2,1),border-color 210ms ease,box-shadow 210ms ease; }
+[data-testid="stMetric"]:hover, .panel:hover, .kpi-card:hover, .hero:hover, .status-card:hover { transform:translateZ(12px) scale(1.012); border-color:rgba(49,215,255,.58); box-shadow:0 22px 35px rgba(0,0,0,.45),0 13px 31px rgba(49,215,255,.18),0 0 27px rgba(49,215,255,.15); }
 div[data-testid="stButton"] button {
     transition: transform 180ms ease, border-color 180ms ease, box-shadow 180ms ease, filter 180ms ease;
     border: 1px solid rgba(49,215,255,.24);
@@ -460,22 +489,22 @@ div[data-testid="stButton"] button:hover {
     box-shadow: 0 10px 20px rgba(0,0,0,.32), 0 0 17px rgba(49,215,255,.18);
     filter: brightness(1.07);
 }
-div[role="radiogroup"] { gap: 1.15rem; border-bottom: 1px solid rgba(49,215,255,.14); padding: 0 .15rem .28rem; }
+div[role="radiogroup"] { gap:1.45rem; border-bottom:1px solid rgba(49,215,255,.18); padding:0 .15rem .36rem; }
+div[role="radiogroup"] input[type="radio"], [data-testid="stRadio"] label > div:first-child { position:absolute !important; opacity:0 !important; width:1px !important; height:1px !important; overflow:hidden !important; pointer-events:none !important; }
 div[role="radiogroup"] label {
     background: transparent !important; border: 0 !important; border-radius: 0 !important;
-    color: #7890aa !important; padding: .38rem 0 !important; font-size: .68rem !important;
-    font-weight: 800 !important; letter-spacing: .07em; transition: color 180ms ease, text-shadow 180ms ease;
+    color:#7890aa !important; padding:.42rem 0 !important; font-size:.68rem !important;
+    font-weight:800 !important; letter-spacing:.09em; transition:color 180ms ease,text-shadow 180ms ease,box-shadow 180ms ease;
 }
 div[role="radiogroup"] label:hover { color: #eaf8ff !important; text-shadow: 0 0 10px rgba(49,215,255,.34); }
-div[role="radiogroup"] label:has(input:checked) { color: #57dcff !important; box-shadow: inset 0 -2px 0 #31d7ff; }
-.brand, .hero, .section-title, .panel-title, [data-testid="stMetric"] { user-select: none; cursor: default; }
-.status-card { border: 1px solid #1c3146; background: linear-gradient(135deg, rgba(13,28,42,.94), rgba(7,14,23,.94)); border-radius: 12px; padding: 12px 14px; min-height: 82px; }
-.status-label { color:#7890aa; font-size:.60rem; letter-spacing:.12em; font-weight:800; text-transform:uppercase; }
-.status-value { color:#eef8ff; font-size:1rem; font-weight:800; margin-top:7px; overflow-wrap:anywhere; }
-.notice { border-left: 3px solid #31d7ff; background: rgba(15,31,46,.65); border-radius: 8px; padding: 10px 12px; margin: 7px 0; font-size:.75rem; }
-.notice.warning { border-left-color:#ffc857; }.notice.danger { border-left-color:#ff4d5f; }.notice.success { border-left-color:#42f59b; }
+div[role="radiogroup"] label:has(input:checked) { color:#eafcff !important; box-shadow:inset 0 -2px 0 #31d7ff; text-shadow:0 0 13px rgba(49,215,255,.52); }
+.brand, .hero, .section-title, .panel-title, .ops-card, .command-header, [data-testid="stMetric"] { user-select:none; cursor:default; }
+.notice { position:relative; overflow:hidden; border:1px solid rgba(49,215,255,.28); border-left:3px solid #31d7ff; background:linear-gradient(105deg,rgba(16,38,56,.9),rgba(8,16,26,.84)); border-radius:10px; padding:13px 15px; margin:9px 0; color:#c8d9e9; font-size:.75rem; line-height:1.5; box-shadow:inset 0 1px 0 rgba(255,255,255,.025); }.notice b { color:#eaf8ff; font-size:.66rem; letter-spacing:.12em; }.notice.warning { border-color:rgba(255,200,87,.34); border-left-color:#ffc857; }.notice.danger { border-color:rgba(255,77,95,.38); border-left-color:#ff4d5f; }.notice.success { border-color:rgba(66,245,155,.34); border-left-color:#42f59b; }
+.workflow-panel { padding:4px 15px; }.workflow-row { display:grid; grid-template-columns:46px minmax(120px,.65fr) minmax(220px,1.8fr); align-items:center; gap:12px; min-height:50px; border-bottom:1px solid rgba(84,121,150,.18); border-left:2px solid #4c6f89; padding:7px 10px; }.workflow-row:last-child { border-bottom:0; }.workflow-row.success { border-left-color:#42f59b; }.workflow-row.warning { border-left-color:#ffc857; }.workflow-row.danger { border-left-color:#ff4d5f; }.workflow-number { font:700 .63rem "JetBrains Mono",monospace; color:#7895ac; }.workflow-stage { color:#e6f5ff; font-size:.69rem; font-weight:800; letter-spacing:.08em; }.workflow-detail { color:#8ea7bc; font-size:.68rem; text-align:right; line-height:1.35; }.workflow-state { font-size:.73rem; margin-right:6px; }
+.dispatch-board { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:10px; margin:0 0 13px; }.dispatch-attempt { border:1px solid #284257; border-top:2px solid #5fdaff; border-radius:10px; padding:12px; background:linear-gradient(145deg,rgba(13,29,43,.94),rgba(7,14,23,.98)); }.dispatch-attempt.warning { border-top-color:#ffc857; }.dispatch-attempt.danger { border-top-color:#ff4d5f; }.dispatch-attempt.success { border-top-color:#42f59b; }.dispatch-attempt-label { color:#8ba6bd; font-size:.57rem; font-weight:800; letter-spacing:.12em; }.dispatch-attempt-name { color:#eff9ff; margin-top:8px; font-size:.88rem; font-weight:800; }.dispatch-attempt-state { margin-top:8px; font-size:.66rem; font-weight:800; }.audit-chain-card { display:flex; align-items:center; gap:12px; margin:0 0 10px; padding:13px 15px; border:1px solid rgba(66,245,155,.42); border-radius:11px; background:linear-gradient(100deg,rgba(12,47,34,.7),rgba(7,15,23,.9)); }.audit-chain-card.invalid { border-color:rgba(255,77,95,.42); background:linear-gradient(100deg,rgba(55,17,26,.65),rgba(7,15,23,.9)); }.audit-chain-symbol { color:#5af1af; font-size:1.15rem; }.audit-chain-card.invalid .audit-chain-symbol { color:#ff6e7c; }.audit-chain-title { color:#a7bfce; font-size:.59rem; font-weight:800; letter-spacing:.13em; }.audit-chain-value { margin-top:3px; color:#eafaff; font-size:.9rem; font-weight:800; }
 .section-mark { color:var(--cyan); font-size:.72rem; margin-right:.38rem; }.section-mark.warning { color:var(--yellow); }
-@media (max-width: 900px) { div[role="radiogroup"] { gap:.55rem; flex-wrap:wrap; } div[role="radiogroup"] label { font-size:.59rem !important; } .brand-sub { display:none; } }
+@media (max-width:1100px) { .command-header { grid-template-columns:1fr; gap:18px; }.command-states { border-left:0; }.overview-banner { align-items:flex-start; flex-direction:column; }.overview-banner-detail { text-align:left; }.workflow-row { grid-template-columns:38px 120px 1fr; } }
+@media (max-width:900px) { div[role="radiogroup"] { gap:.55rem; flex-wrap:wrap; } div[role="radiogroup"] label { font-size:.59rem !important; } .brand-sub { display:none; } .command-header { padding:18px; }.command-states { grid-template-columns:repeat(2,1fr); }.command-state { border-bottom:1px solid rgba(49,215,255,.12); }.workflow-row { grid-template-columns:32px 1fr; }.workflow-detail { grid-column:2; text-align:left; }.ops-card:hover { transform:translateZ(9px) scale(1.008); } }
 
 div[data-testid="stAlert"] {
     border-radius: 10px;
@@ -667,50 +696,17 @@ def render_header(result: Optional[Dict[str, Any]], supervisory: Optional[Dict[s
         css = "ready"
         detail = "Autonomous resilience engine standing by"
 
-    left, middle, right = st.columns([1.70, 1.0, .95])
-
-    with left:
-        render_html(
-            """
-            <div class="brand">
-                <div class="shield">H</div>
-                <div>
-                    <div class="brand-name">HARIS</div>
-                    <div class="brand-sub">
-                        Autonomous Network Resilience Engineer ·
-                        Predict · Protect · Preserve · Prove
-                    </div>
-                </div>
+    render_html(
+        f"""
+        <div class="overview-banner">
+            <div>
+                <div class="command-kicker">AUTONOMOUS NETWORK RESILIENCE</div>
+                <div class="overview-banner-title">Operational overview</div>
             </div>
-            """
-        )
-
-    with middle:
-        render_html(
-            f"""
-            <div class="live-pill">
-                <span class="live-dot"></span>
-                {presentation_mode_label()} · NETWORK FABRIC
-            </div>
-            """
-        )
-
-    with right:
-        render_html(
-            f"""
-            <div class="hero">
-                <div class="hero-label">HARIS STATE</div>
-                <div class="hero-value {css}">{text}</div>
-                <div class="hero-detail">{detail}</div>
-            </div>
-            """
-        )
-
-    st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
-
-    a, b = st.columns(2)
-    a.metric("Network Capabilities", "7", help="Architectural capability count, not a live KPI.")
-    b.metric("NAC Mode", presentation_mode_label())
+            <div class="overview-banner-detail">{safe_text(detail)} Current cycle state: <b class="{css}">{safe_text(text)}</b></div>
+        </div>
+        """
+    )
 
     if settings.nac_mode == "live_read_only":
         st.info(
@@ -752,9 +748,7 @@ def render_capability_matrix(result: Optional[Dict[str, Any]]) -> None:
         item = report.get(key, {"status": "PRIVILEGED_ONLY", "reason": "Number Verification + SIM Swap; privileged field intervention only."})
         status = display.get(item.get("status"), str(item.get("status", "UNKNOWN")).replace("_", " "))
         with columns[index % 3]:
-            st.metric(label, status)
-            if item.get("reason"):
-                st.caption(item["reason"])
+            render_html(operational_card(label, status, item.get("reason")))
 
 
 def render_environment(result: Optional[Dict[str, Any]]) -> None:
@@ -773,10 +767,10 @@ def render_prediction(result: Optional[Dict[str, Any]]) -> None:
     prediction = safe_mapping(prediction)
     st.markdown('<div class="section-title"><span class="section-mark">●</span><span>SHORT-HORIZON RISK FORECAST</span></div>', unsafe_allow_html=True)
     a, b, c, d = st.columns(4)
-    a.metric("Predicted Risk", safe_upper(prediction.get("predicted_risk_level"), "N/A"))
-    b.metric("Forecast Horizon", f"{prediction.get('horizon_minutes', 'N/A')} min")
-    c.metric("Confidence", f"{float(prediction.get('confidence', 0)) * 100:.0f}%")
-    d.metric("Degradation Probability", f"{float(prediction.get('degradation_probability', 0)) * 100:.0f}%")
+    with a: render_html(operational_card("Predicted Risk", safe_upper(prediction.get("predicted_risk_level"), "N/A")))
+    with b: render_html(operational_card("Forecast Horizon", f"{prediction.get('horizon_minutes', 'N/A')} min", "Forecast window"))
+    with c: render_html(operational_card("Confidence", f"{float(prediction.get('confidence', 0)) * 100:.0f}%", "Model confidence"))
+    with d: render_html(operational_card("Degradation Probability", f"{float(prediction.get('degradation_probability', 0)) * 100:.0f}%", "Forecast probability"))
     st.caption("Top factors: " + "; ".join(prediction.get("contributing_factors", [])))
 
     incident = (result or {}).get("incident", {})
@@ -1475,33 +1469,20 @@ def render_decision_engine(
     left, right = st.columns([2.2, 1])
 
     with left:
-        html = '<div class="panel">'
+        html = '<div class="panel workflow-panel">'
 
         for number, stage, detail, success in stages:
             skipped = (identity_pending and stage in {"WARDEN", "ACTUATOR", "VERIFY"}) or (read_only and stage in {"ACTUATOR", "VERIFY"}) or (
                 stage == "ROLLBACK" and detail == "Not required"
             )
-            color = "#42f59b" if success else "#ffc857" if skipped else "#ff6170"
-            icon = "✓" if success else "!"
+            tone = "success" if success else "warning" if skipped else "danger"
+            icon = "&#10003;" if success else "&#9651;" if skipped else "&#215;"
 
             html += f"""
-            <div class="row">
-                <span>
-                    <b style="color:{color};font-size:.85rem;">
-                        {icon}
-                    </b>
-                    &nbsp;
-                    <b style="color:#d9e7f5;">
-                        {number} · {stage}
-                    </b>
-                </span>
-
-                <span style="
-                    color:#7189a4;
-                    font-size:.66rem;
-                ">
-                    {detail}
-                </span>
+            <div class="workflow-row {tone}">
+                <span class="workflow-number">{number}</span>
+                <span class="workflow-stage"><span class="workflow-state">{icon}</span>{safe_text(stage)}</span>
+                <span class="workflow-detail">{safe_text(detail)}</span>
             </div>
             """
 
@@ -1512,11 +1493,9 @@ def render_decision_engine(
     with right:
         status = safe_upper(result.get("final_status"), "REVIEW")
 
-        status_color = (
-            "#42f59b"
-            if status == "MITIGATED"
-            else "#ff6170"
-        )
+        status_color = {
+            "success": "#42f59b", "warning": "#ffc857", "danger": "#ff6170", "neutral": "#63d9ff",
+        }[semantic_tone(status)]
 
         protected = len(
             [
@@ -1747,7 +1726,13 @@ def render_history(supervisory: Optional[Dict[str, Any]] = None) -> None:
     else:
         records = get_system().memory.recent_incidents()
         chain = get_system().memory.verify_audit_chain()
-    st.caption("AUDIT CHAIN: " + ("VALID" if chain.get("valid") else "LEGACY/INVALID") + " — tamper-evident append-only history")
+    audit_valid = bool(chain.get("valid"))
+    render_html(
+        f'<div class="audit-chain-card{"" if audit_valid else " invalid"}">'
+        f'<div class="audit-chain-symbol">{"&#10003;" if audit_valid else "&#215;"}</div>'
+        f'<div><div class="audit-chain-title">TAMPER-EVIDENT AUDIT CHAIN</div>'
+        f'<div class="audit-chain-value">AUDIT CHAIN: {"VALID" if audit_valid else "LEGACY/INVALID"}</div></div></div>'
+    )
     if not records:
         st.caption("No append-only audit history is available yet.")
         return
@@ -1784,11 +1769,34 @@ def render_status_bar(result: Optional[Dict[str, Any]], supervisory: Optional[Di
     supervisory = safe_mapping(supervisory)
     incident = safe_mapping(supervisory.get("active_incident") or cycle.get("incident"))
     warden = safe_mapping(cycle.get("warden"))
-    st.caption(
-        f"HARIS STATE: {authoritative_haris_state(cycle, supervisory)} | "
-        f"NOKIA STATE: {get_system().client.name.upper()} | MODE: {settings.nac_mode.upper()} | "
-        f"WARDEN: {'APPROVED' if warden.get('verified') else 'REVIEW'} | "
-        f"ACTIVE INCIDENT: {incident.get('incident_id') or 'NONE'}"
+    dispatch = safe_mapping(cycle.get("trusted_dispatch"))
+    haris_state = authoritative_haris_state(cycle, supervisory)
+    warden_state = (
+        "PENDING" if dispatch.get("status") == "WAITING_FOR_IDENTITY_VERIFICATION"
+        else "BLOCKED" if dispatch.get("decision") == "BLOCK"
+        else "APPROVED" if warden.get("verified") else "REVIEW"
+    )
+    states = [
+        ("SYSTEM STATUS", haris_state),
+        ("NOKIA NaC", safe_upper(get_system().client.name, "UNAVAILABLE")),
+        ("MODE", presentation_mode_label()),
+        ("WARDEN", warden_state),
+        ("ACTIVE INCIDENT", incident.get("incident_id") or "NONE"),
+    ]
+    state_html = "".join(
+        f'<div class="command-state {semantic_tone(value)}"><div class="command-state-label">{safe_text(label)}</div><div class="command-state-value">{safe_text(value)}</div></div>'
+        for label, value in states
+    )
+    render_html(
+        f"""
+        <div class="command-header">
+            <div>
+                <div class="command-kicker">AI-POWERED NETWORK RESILIENCE</div>
+                <div class="command-brand"><div class="command-mark">H</div><div><div class="command-name">HARIS</div><div class="command-subtitle">Hybrid Agent for Resilient Infrastructure and Service-continuity</div></div></div>
+            </div>
+            <div class="command-states">{state_html}</div>
+        </div>
+        """
     )
 
 
@@ -1798,17 +1806,20 @@ def render_overview(result: Optional[Dict[str, Any]], supervisory: Optional[Dict
     incident = safe_mapping(safe_mapping(supervisory).get("active_incident") or cycle.get("incident"))
     prediction, warden = safe_mapping(cycle.get("prediction")), safe_mapping(cycle.get("warden"))
     cols = st.columns(5)
+    backend_value = "CONNECTED" if settings.haris_backend_url and supervisory else "UNAVAILABLE" if settings.haris_backend_url else "LOCAL"
+    dispatch = safe_mapping(cycle.get("trusted_dispatch"))
+    warden_value = "PENDING" if dispatch.get("status") == "WAITING_FOR_IDENTITY_VERIFICATION" else "APPROVED" if warden.get("verified") else "REVIEW"
     cards = [
-        ("Backend Health", "HEALTHY"),
-        ("Nokia Integration", get_system().client.name.upper()),
-        ("WARDEN", "APPROVED" if warden.get("verified") else "REVIEW"),
-        ("Active Incident", incident.get("incident_id") or "NONE"),
-        ("Predicted Risk", safe_upper(prediction.get("predicted_risk_level"), "MONITORING")),
+        ("Backend Health", backend_value, "Authoritative backend supervision" if settings.haris_backend_url else "Local fixture console"),
+        ("Nokia Integration", safe_upper(get_system().client.name, "UNAVAILABLE"), presentation_mode_label()),
+        ("WARDEN", warden_value, dispatch.get("reason") or "Safety authority state"),
+        ("Active Incident", incident.get("incident_id") or "NONE", ", ".join(incident.get("affected_cells") or []) or "No active incident"),
+        ("Predicted Risk", safe_upper(prediction.get("predicted_risk_level"), "MONITORING"), "Authoritative forecast state" if prediction else "No active forecast"),
     ]
-    for column, (label, value) in zip(cols, cards):
+    for column, (label, value, detail) in zip(cols, cards):
         with column:
-            render_html(f'<div class="status-card"><div class="status-label">{label}</div><div class="status-value">{value}</div></div>')
-    st.markdown('### OPERATIONAL NOTIFICATIONS')
+            render_html(operational_card(label, value, detail))
+    st.markdown('<div class="section-title"><span class="section-mark">●</span><span>OPERATIONAL NOTIFICATIONS</span></div>', unsafe_allow_html=True)
     notices = overview_notifications(cycle, supervisory)
     if notices:
         for tone, title, message in notices:
@@ -1848,8 +1859,25 @@ def render_trusted_dispatch(result: Optional[Dict[str, Any]], supervisory: Optio
         sync_backend_consent_binding(dispatch)
     if dispatch:
         safe_status = {key: value for key, value in dispatch.items() if key != "authorization_url"}
-        st.json(safe_status)
         history = (supervisory or {}).get("dispatch_history") or (result or {}).get("dispatch_history", [])
+        attempt_cards: List[str] = []
+        for attempt in [safe_mapping(item) for item in history[-2:]]:
+            attempt_state = attempt.get("final_dispatch_status") or attempt.get("warden_decision") or attempt.get("verification_status") or "REVIEW"
+            attempt_cards.append(
+                f'<div class="dispatch-attempt {semantic_tone(attempt_state)}">'
+                f'<div class="dispatch-attempt-label">ENGINEER ATTEMPT</div>'
+                f'<div class="dispatch-attempt-name">{safe_text(attempt.get("engineer_name") or attempt.get("engineer_id"), "AUTHORIZED ENGINEER")}</div>'
+                f'<div class="dispatch-attempt-state" style="color:var(--{ "red" if semantic_tone(attempt_state) == "danger" else "yellow" if semantic_tone(attempt_state) == "warning" else "green" });">{safe_text(attempt_state)}</div></div>'
+            )
+        current_state = dispatch.get("status") or dispatch.get("decision") or "REVIEW"
+        attempt_cards.append(
+            f'<div class="dispatch-attempt {semantic_tone(current_state)}">'
+            f'<div class="dispatch-attempt-label">CURRENT AUTHORIZATION</div>'
+            f'<div class="dispatch-attempt-name">{safe_text(dispatch.get("engineer_name") or dispatch.get("engineer_id"), "NO ENGINEER SELECTED")}</div>'
+            f'<div class="dispatch-attempt-state" style="color:var(--{ "red" if semantic_tone(current_state) == "danger" else "yellow" if semantic_tone(current_state) == "warning" else "green" });">{safe_text(current_state)}</div></div>'
+        )
+        render_html('<div class="dispatch-board">' + "".join(attempt_cards) + '</div>')
+        st.json(safe_status)
         if history:
             st.caption("BACKEND DISPATCH ATTEMPTS")
             st.dataframe(history, use_container_width=True, hide_index=True)

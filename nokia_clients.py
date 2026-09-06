@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Generic, List, Optional, TypeVar
 
 from fastapi import APIRouter, FastAPI, HTTPException
+from fastapi.openapi.docs import get_swagger_ui_html
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from config import AppSettings, get_settings
@@ -1425,9 +1427,43 @@ async def slice_detach(req: SliceRequest):
     return ApiResponse(data=data, source=client.name, latency_ms=latency)
 
 
+SWAGGER_HARIS_CSS = """
+<style>
+:root { color-scheme: dark; }
+body { background:#060a10 !important; color:#eaf4ff !important; font-family:Inter,ui-sans-serif,system-ui,sans-serif !important; }
+.haris-docs-header { max-width:1460px; margin:0 auto; padding:24px 20px 15px; border-bottom:1px solid rgba(49,215,255,.18); background:linear-gradient(180deg,rgba(12,28,43,.84),rgba(6,10,16,.25)); }
+.haris-docs-mark { display:inline-grid; place-items:center; width:30px; height:30px; margin-right:10px; border:1px solid #31d7ff; border-radius:8px; color:#31d7ff; font:800 15px/1 ui-monospace,monospace; box-shadow:0 0 14px rgba(49,215,255,.18); }
+.haris-docs-title { color:#eff9ff; font-size:22px; font-weight:800; letter-spacing:.04em; }.haris-docs-sub { margin-top:5px; color:#829ab3; font-size:12px; letter-spacing:.04em; }.haris-docs-note { margin-top:12px; color:#a8c1d7; font-size:12px; }
+.swagger-ui { max-width:1460px; margin:0 auto; color:#dce9f5; }.swagger-ui .topbar { display:none; }.swagger-ui .info { margin:26px 0 18px; }.swagger-ui .info .title, .swagger-ui .info hgroup.main a { color:#56dcff; }.swagger-ui .info p, .swagger-ui .info li, .swagger-ui .info a { color:#9ab0c4; }
+.swagger-ui .scheme-container { background:#0b1420; box-shadow:none; border:1px solid #1a3147; border-radius:10px; }.swagger-ui .opblock-tag { color:#63ddff; border-bottom-color:#1d3449; }.swagger-ui .opblock { background:#0b1420; border-color:#20394f; border-radius:9px; box-shadow:none; transition:border-color 180ms ease,box-shadow 180ms ease; }.swagger-ui .opblock:hover { border-color:#3bccef; box-shadow:0 8px 20px rgba(0,0,0,.28),0 0 15px rgba(49,215,255,.08); }
+.swagger-ui .opblock .opblock-summary { border-color:rgba(255,255,255,.04); }.swagger-ui .opblock .opblock-summary-path, .swagger-ui .opblock .opblock-summary-description, .swagger-ui .parameter__name, .swagger-ui .parameter__type { color:#e8f4ff; }.swagger-ui .opblock.opblock-get { border-color:#2183c2; background:rgba(18,63,95,.27); }.swagger-ui .opblock.opblock-post { border-color:#218c61; background:rgba(14,72,48,.25); }.swagger-ui .opblock.opblock-delete { border-color:#b83d4d; background:rgba(91,22,32,.25); }.swagger-ui .opblock.opblock-put, .swagger-ui .opblock.opblock-patch { border-color:#b98727; background:rgba(84,58,16,.24); }
+.swagger-ui .opblock-body, .swagger-ui .responses-wrapper, .swagger-ui .model-box, .swagger-ui section.models { background:#08111b; color:#dce9f5; }.swagger-ui .response-col_status, .swagger-ui .response-col_description, .swagger-ui .model-title, .swagger-ui .models h4 { color:#dce9f5; }.swagger-ui input, .swagger-ui textarea, .swagger-ui select { background:#060d15; color:#eaf4ff; border-color:#294158; }.swagger-ui .btn { border-radius:7px; }.swagger-ui .btn.execute { background:#16845b; border-color:#2bb982; }.swagger-ui .btn.try-out__btn { border-color:#31bfe8; color:#60ddff; }.swagger-ui pre, .swagger-ui .microlight { background:#050a10 !important; color:#d9e9f7 !important; border:1px solid #1d3347; }.swagger-ui table thead tr td, .swagger-ui table thead tr th { color:#6bdfff; border-color:#20384e; }.swagger-ui svg { fill:currentColor; }
+</style>
+"""
+
+
 def create_fastapi_app() -> FastAPI:
-    api = FastAPI(title="HARIS Network Control API", version="1.0.0")
+    api = FastAPI(title="HARIS Network Control API", version="1.0.0", docs_url=None)
     api.include_router(router)
+
+    @api.get("/docs", include_in_schema=False)
+    async def haris_swagger_docs() -> HTMLResponse:
+        """Presentation-only Swagger shell; OpenAPI and endpoints are unchanged."""
+        page = get_swagger_ui_html(
+            openapi_url=api.openapi_url,
+            title="HARIS Backend API / Engineering Interface",
+            swagger_ui_parameters={"persistAuthorization": True},
+        )
+        content = page.body.decode("utf-8")
+        header = (
+            '<div class="haris-docs-header"><div><span class="haris-docs-mark">H</span>'
+            '<span class="haris-docs-title">HARIS</span></div>'
+            '<div class="haris-docs-sub">Backend API / Engineering Interface · Nokia Network as Code Integration Layer</div>'
+            '<div class="haris-docs-note">Engineering API Documentation — use the HARIS application for the guided demo. Sensitive or state-changing endpoints should not be executed during presentation unless explicitly required.</div></div>'
+        )
+        content = content.replace("</head>", SWAGGER_HARIS_CSS + "</head>")
+        content = content.replace('<div id="swagger-ui">', header + '<div id="swagger-ui">')
+        return HTMLResponse(content=content)
     return api
 
 
