@@ -162,6 +162,16 @@ class EngineeringCompletionTests(unittest.TestCase):
         app.render_trusted_dispatch(None)
         app.render_history_audit(None)
 
+    def test_api_startup_is_lazy_when_scheduler_disabled(self):
+        import run_api
+        run_api._system = None
+        run_api._scheduler = None
+        run_api._scheduler_task = None
+        settings = AppSettings(nac_mode="fixture", enable_continuous_loop=False, gemini_api_key=None, groq_api_key=None)
+        with patch("run_api.get_settings", return_value=settings), patch("run_api.HarisAgentSystem") as system:
+            asyncio.run(run_api.start_haris_scheduler())
+        system.assert_not_called()
+
     def test_reasoning_router_mocked_success_malformed_and_failure_fallback(self):
         settings = AppSettings(nac_mode="fixture", fixture_dir="fixtures", gemini_api_key=None, groq_api_key=None)
         router = ReasoningRouter(settings)

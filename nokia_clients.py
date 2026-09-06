@@ -1025,11 +1025,17 @@ class TrustedDispatchRequest(BaseModel):
 
 
 dispatch_resume_handler: Optional[Callable[[PendingDispatch], Any]] = None
+dispatch_system_factory: Optional[Callable[[], Any]] = None
 
 def register_dispatch_resume_handler(handler: Callable[[PendingDispatch], Any]) -> None:
     """Install the backend-owned continuation handler; never client controlled."""
     global dispatch_resume_handler
     dispatch_resume_handler = handler
+
+def register_dispatch_system_factory(factory: Callable[[], Any]) -> None:
+    """Register a lazy backend-system factory without constructing it on import."""
+    global dispatch_system_factory
+    dispatch_system_factory = factory
 
 
 async def start_number_verification_for_dispatch(pending: PendingDispatch, settings: Optional[AppSettings] = None) -> Dict[str, str]:
@@ -1216,6 +1222,11 @@ async def number_verification_callback(code: str, state: str) -> Dict[str, str]:
                     pending_id=pending.dispatch_pending_id, engineer_id=pending.engineer_id,
                     phone_number=pending.phone_number, oauth_state=state,
                 )
+                # Scheduler-disabled web deployments construct the HARIS system
+                # lazily here, after the server is already bound and only for a
+                # verified callback that genuinely needs continuation.
+                if dispatch_resume_handler is None and dispatch_system_factory:
+                    dispatch_system_factory()
                 if dispatch_resume_handler:
                     resumed = dispatch_resume_handler(dispatch)
                     if inspect.isawaitable(resumed): await resumed
