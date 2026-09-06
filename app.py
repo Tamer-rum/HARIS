@@ -404,6 +404,18 @@ def run_async(coro):
             loop.close()
 
 
+async def backend_request(method: str, path: str, payload: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    """Use Render as authority when the console is deployed separately."""
+    if not settings.haris_backend_url:
+        return None
+    import httpx
+    base = settings.haris_backend_url.rstrip("/")
+    async with httpx.AsyncClient(timeout=10.0) as http:
+        response = await http.request(method, f"{base}{path}", json=payload)
+        response.raise_for_status()
+        return response.json()
+
+
 @st.cache_resource(show_spinner=False)
 def get_system() -> HarisAgentSystem:
     return HarisAgentSystem(
@@ -1568,7 +1580,18 @@ def render_controls() -> None:
             with st.spinner("HARIS is running the simulated physical-intervention workflow…"):
                 start = time.perf_counter()
                 try:
-                    st.session_state.last_result = run_async(get_system().run_field_intervention_demo())
+                    if settings.haris_backend_url:
+                        payload = run_async(backend_request("POST", "/api/nac/autonomous/field-intervention-demo"))
+                        if not payload:
+                            raise RuntimeError("Authoritative HARIS backend did not return a demo status.")
+                        st.session_state.last_result = payload.get("cycle", {})
+                        st.session_state.backend_consent_action_token = payload.get("consent_action_token")
+                        st.session_state.pop("backend_authorization_url", None)
+                    else:
+                        # Local standalone fixture fallback only. A deployed
+                        # console must configure HARIS_BACKEND_URL so Render
+                        # owns pending dispatch/OAuth state.
+                        st.session_state.last_result = run_async(get_system().run_field_intervention_demo())
                     st.session_state.last_elapsed = time.perf_counter() - start
                     st.rerun()
                 except Exception as exc:
@@ -1672,12 +1695,28 @@ def render_network_intelligence(result: Optional[Dict[str, Any]]) -> None:
 
 def render_trusted_dispatch(result: Optional[Dict[str, Any]]) -> None:
     st.markdown('### TRUSTED DISPATCH')
+    if settings.haris_backend_url:
+        try:
+            payload = run_async(backend_request("GET", "/api/nac/autonomous/status"))
+            if payload:
+                result = payload.get("cycle") or result
+        except Exception:
+            st.warning("Authoritative HARIS backend is unavailable; Trusted Dispatch remains fail-closed.")
     dispatch = (result or {}).get("trusted_dispatch") or get_system().current_dispatch_status
     if dispatch:
         safe_status = {key: value for key, value in dispatch.items() if key != "authorization_url"}
         st.json(safe_status)
         if dispatch.get("status") == "WAITING_FOR_IDENTITY_VERIFICATION": st.warning("Awaiting consent-bound Nokia Number Verification; dispatch remains blocked.")
-        authorization_url = get_system().dispatch_authorization_url
+        authorization_url = st.session_state.get("backend_authorization_url") if settings.haris_backend_url else get_system().dispatch_authorization_url
+        if settings.haris_backend_url and not authorization_url and st.session_state.get("backend_consent_action_token"):
+            try:
+                handoff = run_async(backend_request("POST", "/api/nac/autonomous/consent-action", {"action_token": st.session_state.backend_consent_action_token}))
+                if handoff:
+                    authorization_url = handoff.get("authorization_url")
+                    st.session_state.backend_authorization_url = authorization_url
+                    st.session_state.pop("backend_consent_action_token", None)
+            except Exception:
+                st.warning("Secure consent action is unavailable or expired; dispatch remains fail-closed.")
         if authorization_url:
             st.link_button("Open secure Nokia Number Verification", authorization_url, type="primary")
     else: st.caption("No privileged field intervention is required. Routine remediation does not call Number Verification or SIM Swap.")

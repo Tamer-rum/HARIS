@@ -256,6 +256,7 @@ class HarisAgentSystem:
         self.forecaster = RiskForecaster()
         self.engineers = AuthorizedEngineerRegistry(self.settings.authorized_engineer_registry_path)
         self._latest_dispatch: Dict[str, Any] = {}
+        self._latest_cycle: Dict[str, Any] = {}
         register_dispatch_resume_handler(self._resume_pending_dispatch)
         self._cached_environment: Optional[bool] = None
         self.crewai_agents: Dict[str, Any] = {}
@@ -283,6 +284,20 @@ class HarisAgentSystem:
     def dispatch_authorization_url(self) -> Optional[str]:
         """Transient consent handoff; deliberately excluded from audit/status."""
         return self._latest_dispatch.get("authorization_url")
+
+    @property
+    def current_cycle_status(self) -> Dict[str, Any]:
+        """Sanitized summary for a remote supervisory UI, never an audit dump."""
+        state = self._latest_cycle
+        return {
+            "cycle_id": state.get("cycle_id"), "final_status": state.get("final_status"),
+            "incident": state.get("incident", {}), "prediction": state.get("prediction", {}),
+            "trusted_dispatch": self.current_dispatch_status,
+            "field_intervention_evidence": state.get("field_intervention_evidence", {}),
+            "active_playbook": state.get("active_playbook", {}),
+            "trace": state.get("trace", []), "events": state.get("events", []),
+            "learning": state.get("learning", {}),
+        }
 
     def _init_crewai_agents(self) -> None:
         if not CREWAI_AVAILABLE:
@@ -2307,6 +2322,7 @@ class HarisAgentSystem:
         }
 
         result = await self.graph.ainvoke(initial)
+        self._latest_cycle = result
         return result
 
     async def run_field_intervention_demo(self) -> HarisState:

@@ -112,6 +112,26 @@ class PendingDispatchStore:
             return item.model_copy() if item else None
 
 
+class FrontendConsentTokenStore:
+    """One-time, opaque handoff tokens for a pending consent launch."""
+    ttl_seconds = 300
+    def __init__(self) -> None:
+        self._tokens: Dict[str, tuple[str, float]] = {}
+        self._lock = threading.Lock()
+
+    def issue(self, pending_id: str) -> str:
+        token = secrets.token_urlsafe(32)
+        with self._lock: self._tokens[token] = (pending_id, time.time() + self.ttl_seconds)
+        return token
+
+    def consume(self, token: str) -> str:
+        with self._lock:
+            item = self._tokens.pop(token, None)
+        if item is None or time.time() > item[1]:
+            raise ValueError("invalid_or_expired_consent_token")
+        return item[0]
+
+
 class AuthorizedEngineerRegistry:
     def __init__(self, registry_path: str):
         self.registry_path = Path(registry_path)
@@ -154,3 +174,4 @@ class TrustedDispatchHistory:
 
 trusted_dispatch_history = TrustedDispatchHistory()
 pending_dispatches = PendingDispatchStore()
+frontend_consent_tokens = FrontendConsentTokenStore()

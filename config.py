@@ -179,6 +179,9 @@ class AppSettings(BaseSettings):
     api_host: str = "0.0.0.0"
     api_port: int = 8000
     streamlit_port: int = 8501
+    # Public Render API base URL used by a separately deployed Streamlit
+    # supervisor. It is configuration, not a credential.
+    haris_backend_url: Optional[str] = None
     cycle_seconds: int = 60
     enable_continuous_loop: bool = False
     enable_live_write_loop: bool = False

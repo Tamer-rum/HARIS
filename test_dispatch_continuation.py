@@ -6,16 +6,18 @@ from unittest.mock import AsyncMock, patch
 
 from agents import HarisAgentSystem
 from config import AppSettings
-from dispatch import DispatchAttempt, PendingDispatchStore, pending_dispatches, trusted_dispatch_history
+from dispatch import DispatchAttempt, PendingDispatchStore, frontend_consent_tokens, pending_dispatches, trusted_dispatch_history
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 from memory import IncidentMemory, MemoryStore
-from nokia_clients import number_verification_callback, number_verification_states, register_dispatch_resume_handler, verified_identities
+from nokia_clients import app as api_app, number_verification_callback, number_verification_states, register_dispatch_resume_handler, register_dispatch_system_factory, verified_identities
 from nokia_clients import FixtureNokiaClient
 
 
 class DispatchContinuationTests(unittest.TestCase):
     def setUp(self):
         pending_dispatches._items = {}
+        frontend_consent_tokens._tokens = {}
         number_verification_states._pending = {}
         trusted_dispatch_history._attempts = []
         verified_identities._verified_at = {}
@@ -128,6 +130,38 @@ class DispatchContinuationTests(unittest.TestCase):
         self.assertIn("APPROVED", rendered)
         for secret in ("https://nokia.example/auth", "opaque-oauth-code", "raw-state", "test-token", "+99999991000"):
             self.assertNotIn(secret, rendered)
+
+    def test_backend_authority_uses_one_time_consent_handoff_not_public_status(self):
+        class BackendSystem:
+            settings = AppSettings(nac_mode="fixture")
+            dispatch_authorization_url = "https://nokia.example/consent"
+            current_cycle_status = {
+                "final_status": "waiting_for_identity_verification",
+                "trusted_dispatch": {"pending_id": "pending-1", "status": "WAITING_FOR_IDENTITY_VERIFICATION", "masked_phone_number": "***1000"},
+            }
+            current_dispatch_status = current_cycle_status["trusted_dispatch"]
+            def __init__(self): self.calls = 0
+            async def run_field_intervention_demo(self): self.calls += 1
+        backend = BackendSystem()
+        register_dispatch_system_factory(lambda: backend)
+        with TestClient(api_app) as client:
+            response = client.post("/api/nac/autonomous/field-intervention-demo")
+            status = client.get("/api/nac/autonomous/status")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(backend.calls, 1)
+        self.assertEqual(response.json()["cycle"]["trusted_dispatch"]["masked_phone_number"], "***1000")
+        self.assertNotIn("authorization_url", response.json()["cycle"])
+        self.assertNotIn("authorization_url", status.json())
+        self.assertNotIn("consent_action_token", status.json())
+        token = response.json()["consent_action_token"]
+        with TestClient(api_app) as client:
+            handoff = client.post("/api/nac/autonomous/consent-action", json={"action_token": token})
+            replay = client.post("/api/nac/autonomous/consent-action", json={"action_token": token})
+            wrong = client.post("/api/nac/autonomous/consent-action", json={"action_token": "x" * 32})
+        self.assertEqual(handoff.status_code, 200)
+        self.assertEqual(handoff.json()["authorization_url"], "https://nokia.example/consent")
+        self.assertEqual(replay.status_code, 403)
+        self.assertEqual(wrong.status_code, 403)
 
 
 if __name__ == "__main__": unittest.main(verbosity=2)

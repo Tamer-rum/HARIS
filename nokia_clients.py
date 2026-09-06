@@ -16,7 +16,7 @@ from fastapi import APIRouter, FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from config import AppSettings, get_settings
-from dispatch import PendingDispatch, pending_dispatches
+from dispatch import PendingDispatch, frontend_consent_tokens, pending_dispatches
 from memory import MemoryStore
 from network_as_code.models import Device
 
@@ -1024,6 +1024,10 @@ class TrustedDispatchRequest(BaseModel):
     phone_number: str = Field(min_length=3, max_length=32)
 
 
+class ConsentActionRequest(BaseModel):
+    action_token: str = Field(min_length=20, max_length=256)
+
+
 dispatch_resume_handler: Optional[Callable[[PendingDispatch], Any]] = None
 dispatch_system_factory: Optional[Callable[[], Any]] = None
 
@@ -1036,6 +1040,12 @@ def register_dispatch_system_factory(factory: Callable[[], Any]) -> None:
     """Register a lazy backend-system factory without constructing it on import."""
     global dispatch_system_factory
     dispatch_system_factory = factory
+
+
+def _authoritative_haris_system() -> Any:
+    if dispatch_system_factory is None:
+        raise HTTPException(status_code=503, detail="Authoritative HARIS workflow is unavailable.")
+    return dispatch_system_factory()
 
 
 async def start_number_verification_for_dispatch(pending: PendingDispatch, settings: Optional[AppSettings] = None) -> Dict[str, str]:
@@ -1114,6 +1124,40 @@ async def incident_replay(cycle_id: str) -> Dict[str, Any]:
     if not item:
         raise HTTPException(status_code=404, detail="Incident record not found.")
     return item.model_dump()
+
+
+@router.post("/autonomous/field-intervention-demo")
+async def authoritative_field_intervention_demo() -> Dict[str, Any]:
+    """Fixture-only backend-owned dispatch demo; no caller selects trust inputs."""
+    system = _authoritative_haris_system()
+    if system.settings.nac_mode != "fixture":
+        raise HTTPException(status_code=403, detail="Field Intervention Demo is available only in FIXTURE mode.")
+    await system.run_field_intervention_demo()
+    dispatch = system.current_dispatch_status
+    action_token = None
+    if dispatch.get("pending_id") and system.dispatch_authorization_url:
+        action_token = frontend_consent_tokens.issue(dispatch["pending_id"])
+    return {"cycle": system.current_cycle_status, "consent_action_token": action_token}
+
+
+@router.get("/autonomous/status")
+async def authoritative_autonomous_status() -> Dict[str, Any]:
+    """Sanitized supervisory status. URL is transient and never persisted."""
+    system = _authoritative_haris_system()
+    return {"cycle": system.current_cycle_status}
+
+
+@router.post("/autonomous/consent-action")
+async def autonomous_consent_action(request: ConsentActionRequest) -> Dict[str, str]:
+    """One-time consent URL exchange; status endpoints never disclose it."""
+    system = _authoritative_haris_system()
+    try:
+        pending_id = frontend_consent_tokens.consume(request.action_token)
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Consent action is invalid or expired.")
+    if system.current_dispatch_status.get("pending_id") != pending_id or not system.dispatch_authorization_url:
+        raise HTTPException(status_code=403, detail="Consent action no longer matches the active dispatch.")
+    return {"authorization_url": system.dispatch_authorization_url}
 
 
 async def _wrap(fn: Callable[[], Any]) -> Any:
