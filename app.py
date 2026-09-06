@@ -416,6 +416,21 @@ async def backend_request(method: str, path: str, payload: Optional[Dict[str, An
         return response.json()
 
 
+def authoritative_supervisory_status() -> Optional[Dict[str, Any]]:
+    """Read Render's safe workflow view when Render owns the active incident."""
+    if not settings.haris_backend_url:
+        return None
+    try:
+        payload = run_async(backend_request("GET", "/api/nac/autonomous/status"))
+        if payload:
+            st.session_state.backend_supervisory_status = payload
+            return payload
+    except Exception:
+        # Never substitute Streamlit-local security state if Render is down.
+        return st.session_state.get("backend_supervisory_status")
+    return st.session_state.get("backend_supervisory_status")
+
+
 def sync_backend_consent_binding(dispatch: Dict[str, Any]) -> None:
     """Discard consent material when Render advances to another engineer."""
     pending_id, engineer_id = dispatch.get("pending_id"), dispatch.get("engineer_id")
@@ -541,6 +556,10 @@ def render_header(result: Optional[Dict[str, Any]]) -> None:
         text = "BLOCKED SAFELY"
         css = "review"
         detail = "WARDEN rejected the proposed network action"
+    elif final_status == "waiting_for_identity_verification":
+        text = "AWAITING CONSENT"
+        css = "review"
+        detail = "Privileged field intervention remains fail-closed pending Nokia consent"
     elif result:
         text = "REVIEW"
         css = "review"
@@ -1634,18 +1653,25 @@ def render_controls() -> None:
         )
 
 
-def render_history() -> None:
+def render_history(supervisory: Optional[Dict[str, Any]] = None) -> None:
     st.markdown('<div class="section-title">📜 <span>INCIDENT HISTORY / REPLAY</span></div>', unsafe_allow_html=True)
-    records = get_system().memory.recent_incidents()
-    chain = get_system().memory.verify_audit_chain()
+    backend_audit = (supervisory or {}).get("audit") if settings.haris_backend_url else None
+    if backend_audit is not None:
+        records = backend_audit.get("records", [])
+        chain = backend_audit.get("chain", {})
+    else:
+        records = get_system().memory.recent_incidents()
+        chain = get_system().memory.verify_audit_chain()
     st.caption("AUDIT CHAIN: " + ("VALID" if chain.get("valid") else "LEGACY/INVALID") + " — tamper-evident append-only history")
     if not records:
         st.caption("No append-only audit history is available yet.")
         return
-    labels = [f"{item.created_at} · {item.cycle_id or item.incident_id} · {item.outcome}" for item in records]
+    def value(item: Any, name: str, default: Any = "N/A") -> Any:
+        return item.get(name, default) if isinstance(item, dict) else getattr(item, name, default)
+    labels = [f"{value(item, 'created_at')} · {value(item, 'cycle_id') or value(item, 'incident_id')} · {value(item, 'outcome')}" for item in records]
     selected = records[labels.index(st.selectbox("Replay an append-only audit record", labels))]
-    st.caption(f"Mode: {selected.mode or 'N/A'} · Cells: {', '.join(selected.affected_cells) or 'N/A'} · Outcome: {selected.outcome}")
-    st.json(get_system().memory.normalized_view(selected))
+    st.caption(f"Mode: {value(selected, 'mode')} · Cells: {', '.join(value(selected, 'affected_cells', [])) or 'N/A'} · Outcome: {value(selected, 'outcome')}")
+    st.json(selected if isinstance(selected, dict) else get_system().memory.normalized_view(selected))
 
 
 def render_playbook_and_feed(result: Optional[Dict[str, Any]]) -> None:
@@ -1666,9 +1692,9 @@ def render_playbook_and_feed(result: Optional[Dict[str, Any]]) -> None:
 # Console sections
 # ============================================================================
 
-def render_status_bar(result: Optional[Dict[str, Any]]) -> None:
+def render_status_bar(result: Optional[Dict[str, Any]], supervisory: Optional[Dict[str, Any]] = None) -> None:
     """Persistent supervision state, intentionally not an API control surface."""
-    incident = (result or {}).get("incident", {})
+    incident = (supervisory or {}).get("active_incident") or (result or {}).get("incident", {})
     warden = (result or {}).get("warden", {})
     st.caption(
         f"HARIS STATE: {(result or {}).get('final_status', 'READY').upper()} | "
@@ -1678,9 +1704,10 @@ def render_status_bar(result: Optional[Dict[str, Any]]) -> None:
     )
 
 
-def render_overview(result: Optional[Dict[str, Any]]) -> None:
+def render_overview(result: Optional[Dict[str, Any]], supervisory: Optional[Dict[str, Any]] = None) -> None:
     render_header(result)
-    incident, prediction, warden = (result or {}).get("incident", {}), (result or {}).get("prediction", {}), (result or {}).get("warden", {})
+    incident = (supervisory or {}).get("active_incident") or (result or {}).get("incident", {})
+    prediction, warden = (result or {}).get("prediction", {}), (result or {}).get("warden", {})
     cols = st.columns(5)
     cols[0].metric("Backend Health", "HEALTHY")
     cols[1].metric("Nokia Integration", get_system().client.name.upper())
@@ -1709,13 +1736,15 @@ def render_network_intelligence(result: Optional[Dict[str, Any]]) -> None:
     else: st.caption("No Nokia geofence enter/exit event received.")
 
 
-def render_trusted_dispatch(result: Optional[Dict[str, Any]]) -> None:
+def render_trusted_dispatch(result: Optional[Dict[str, Any]], supervisory: Optional[Dict[str, Any]] = None) -> None:
     st.markdown('### TRUSTED DISPATCH')
     if settings.haris_backend_url:
         try:
             payload = run_async(backend_request("GET", "/api/nac/autonomous/status"))
             if payload:
                 result = payload.get("cycle") or result
+                supervisory = payload
+                st.session_state.backend_supervisory_status = payload
         except Exception:
             st.warning("Authoritative HARIS backend is unavailable; Trusted Dispatch remains fail-closed.")
     dispatch = (result or {}).get("trusted_dispatch") or get_system().current_dispatch_status
@@ -1724,6 +1753,10 @@ def render_trusted_dispatch(result: Optional[Dict[str, Any]]) -> None:
     if dispatch:
         safe_status = {key: value for key, value in dispatch.items() if key != "authorization_url"}
         st.json(safe_status)
+        history = (supervisory or {}).get("dispatch_history") or (result or {}).get("dispatch_history", [])
+        if history:
+            st.caption("BACKEND DISPATCH ATTEMPTS")
+            st.dataframe(history, use_container_width=True, hide_index=True)
         if dispatch.get("status") == "WAITING_FOR_IDENTITY_VERIFICATION": st.warning("Awaiting consent-bound Nokia Number Verification; dispatch remains blocked.")
         authorization_url = st.session_state.get("backend_authorization_url") if settings.haris_backend_url else get_system().dispatch_authorization_url
         if settings.haris_backend_url and not authorization_url and not st.session_state.get("backend_consent_action_token") and st.session_state.get("backend_workflow_session_token"):
@@ -1751,8 +1784,8 @@ def render_trusted_dispatch(result: Optional[Dict[str, Any]]) -> None:
     else: st.caption("No privileged field intervention is required. Routine remediation does not call Number Verification or SIM Swap.")
 
 
-def render_history_audit(result: Optional[Dict[str, Any]]) -> None:
-    render_history()
+def render_history_audit(result: Optional[Dict[str, Any]], supervisory: Optional[Dict[str, Any]] = None) -> None:
+    render_history(supervisory)
     st.markdown('### LEARNED MEMORY')
     st.json((result or {}).get("learning") or {"status": "No completed cycle in this session."})
 
@@ -1761,33 +1794,40 @@ def render_history_audit(result: Optional[Dict[str, Any]]) -> None:
 # Main render
 # ============================================================================
 
-result = st.session_state.get("last_result")
-render_status_bar(result)
-section = st.radio(
-    "HARIS CONSOLE", ["OVERVIEW", "NETWORK INTELLIGENCE", "AUTONOMOUS OPERATIONS", "TRUSTED DISPATCH", "HISTORY & AUDIT"],
-    horizontal=True, label_visibility="collapsed",
-)
-st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
+def render_console() -> None:
+    """Render the Streamlit entry point without executing it on test import."""
+    supervisory = authoritative_supervisory_status()
+    result = (supervisory or {}).get("cycle") or st.session_state.get("last_result")
+    render_status_bar(result, supervisory)
+    section = st.radio(
+        "HARIS CONSOLE", ["OVERVIEW", "NETWORK INTELLIGENCE", "AUTONOMOUS OPERATIONS", "TRUSTED DISPATCH", "HISTORY & AUDIT"],
+        horizontal=True, label_visibility="collapsed",
+    )
+    st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
 
-if section == "OVERVIEW":
-    render_overview(result)
-elif section == "NETWORK INTELLIGENCE":
-    render_network_intelligence(result)
-elif section == "AUTONOMOUS OPERATIONS":
-    render_controls()
-    render_decision_engine(result)
-    render_impact(result)
-    render_playbook_and_feed(result)
-elif section == "TRUSTED DISPATCH":
-    render_trusted_dispatch(result)
-elif section == "HISTORY & AUDIT":
-    render_history_audit(result)
+    if section == "OVERVIEW":
+        render_overview(result, supervisory)
+    elif section == "NETWORK INTELLIGENCE":
+        render_network_intelligence(result)
+    elif section == "AUTONOMOUS OPERATIONS":
+        render_controls()
+        render_decision_engine(result)
+        render_impact(result)
+        render_playbook_and_feed(result)
+    elif section == "TRUSTED DISPATCH":
+        render_trusted_dispatch(result, supervisory)
+    elif section == "HISTORY & AUDIT":
+        render_history_audit(result, supervisory)
 
-render_html(
-    """
-    <div class="footer">
-        HARIS · Theme 6 — Climate Resilience & Environmental Monitoring ·
-        GSMA MENA Ignite Hackathon 2026 · Live Network Resilience Console
-    </div>
-    """
-)
+    render_html(
+        """
+        <div class="footer">
+            HARIS · Theme 6 — Climate Resilience & Environmental Monitoring ·
+            GSMA MENA Ignite Hackathon 2026 · Live Network Resilience Console
+        </div>
+        """
+    )
+
+
+if __name__ == "__main__":
+    render_console()

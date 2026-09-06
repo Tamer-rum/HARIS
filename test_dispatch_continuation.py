@@ -173,6 +173,12 @@ class DispatchContinuationTests(unittest.TestCase):
                 "trusted_dispatch": {"pending_id": "pending-1", "incident_id": "incident-1", "status": "WAITING_FOR_IDENTITY_VERIFICATION", "masked_phone_number": "***1000"},
             }
             current_dispatch_status = current_cycle_status["trusted_dispatch"]
+            current_supervisory_status = {
+                "cycle": current_cycle_status,
+                "active_incident": {"incident_id": "incident-1"},
+                "dispatch_history": [{"engineer_id": "eng-demo-01", "masked_phone_number": "***1000", "verification_status": "WAITING_FOR_IDENTITY_VERIFICATION"}],
+                "audit": {"chain": {"valid": True, "records": 1}, "records": [{"cycle_id": "cycle-1", "incident_id": "incident-1", "outcome": "waiting_for_identity_verification"}]},
+            }
             def __init__(self): self.calls = 0
             async def run_field_intervention_demo(self): self.calls += 1
         backend = BackendSystem()
@@ -186,6 +192,8 @@ class DispatchContinuationTests(unittest.TestCase):
         self.assertNotIn("authorization_url", response.json()["cycle"])
         self.assertNotIn("authorization_url", status.json())
         self.assertNotIn("consent_action_token", status.json())
+        self.assertEqual(status.json()["active_incident"]["incident_id"], "incident-1")
+        self.assertEqual(status.json()["dispatch_history"][0]["masked_phone_number"], "***1000")
         token = response.json()["consent_action_token"]
         workflow = response.json()["workflow_session_token"]
         with TestClient(api_app) as client:
@@ -198,6 +206,30 @@ class DispatchContinuationTests(unittest.TestCase):
         self.assertEqual(replay.status_code, 403)
         self.assertEqual(wrong.status_code, 403)
         self.assertEqual(refreshed.status_code, 200)
+
+    def test_backend_supervisory_status_keeps_waiting_incident_and_audits_callback_transition(self):
+        settings = AppSettings(nac_mode="fixture", fixture_dir="fixtures", nac_api_token="test", gemini_api_key=None, groq_api_key=None)
+        memory = MemoryStore(settings); memory._incidents = []; memory._save_local = lambda: None
+        system = HarisAgentSystem(FixtureNokiaClient(settings), memory=memory, settings=settings)
+        with patch("agents.start_number_verification_for_dispatch", new=AsyncMock(return_value={"authorization_url": "https://nokia.example/initial", "expires_in_seconds": "300"})):
+            initial = asyncio.run(system.run_field_intervention_demo())
+        incident_id = initial["incident"]["incident_id"]
+        pending = pending_dispatches.create(incident_id=incident_id, engineer_id="eng-demo-01", phone_number="+99999991000", site="T03", intervention_type="physical", ttl_seconds=60)
+        system._latest_dispatch = {"pending_id": pending.pending_id, "incident_id": incident_id, "engineer_id": "eng-demo-01", "masked_phone_number": "***1000", "status": "WAITING_FOR_IDENTITY_VERIFICATION", "reason": "Fresh Number Verification consent is required."}
+        waiting = system.current_supervisory_status
+        self.assertEqual(waiting["active_incident"]["incident_id"], incident_id)
+        self.assertEqual(waiting["cycle"]["trusted_dispatch"]["incident_id"], incident_id)
+        before = len(waiting["audit"]["records"])
+        with patch("agents.evaluate_trusted_dispatch_phone", new=AsyncMock(return_value={"decision": "BLOCK", "number_verified": True, "recent_sim_swap": True, "reason": "Recent SIM swap detected."})), patch("agents.start_number_verification_for_dispatch", new=AsyncMock(return_value={"authorization_url": "https://nokia.example/consent", "expires_in_seconds": "300"})):
+            asyncio.run(system._resume_pending_dispatch(pending))
+        after = system.current_supervisory_status
+        self.assertEqual(after["cycle"]["trusted_dispatch"]["engineer_id"], "eng-demo-02")
+        self.assertEqual(after["cycle"]["trusted_dispatch"]["status"], "WAITING_FOR_IDENTITY_VERIFICATION")
+        self.assertGreater(len(after["audit"]["records"]), before)
+        self.assertTrue(after["audit"]["chain"]["valid"])
+        rendered = str(after)
+        for secret in ("https://nokia.example/consent", "+99999991000", "oauth_state", "access_token"):
+            self.assertNotIn(secret, rendered)
 
 
 if __name__ == "__main__": unittest.main(verbosity=2)

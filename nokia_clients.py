@@ -1151,9 +1151,9 @@ async def authoritative_field_intervention_demo() -> Dict[str, Any]:
 
 @router.get("/autonomous/status")
 async def authoritative_autonomous_status() -> Dict[str, Any]:
-    """Sanitized supervisory status. URL is transient and never persisted."""
+    """Sanitized backend-owned supervisor state; never an OAuth handoff."""
     system = _authoritative_haris_system()
-    return {"cycle": system.current_cycle_status}
+    return system.current_supervisory_status
 
 
 @router.post("/autonomous/consent-action")

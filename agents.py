@@ -290,15 +290,95 @@ class HarisAgentSystem:
     def current_cycle_status(self) -> Dict[str, Any]:
         """Sanitized summary for a remote supervisory UI, never an audit dump."""
         state = self._latest_cycle
+        incident_id = (state.get("incident") or {}).get("incident_id") or self.current_dispatch_status.get("incident_id")
         return {
             "cycle_id": state.get("cycle_id"), "final_status": state.get("final_status"),
             "incident": state.get("incident", {}), "prediction": state.get("prediction", {}),
             "trusted_dispatch": self.current_dispatch_status,
+            "dispatch_history": [item.model_dump() for item in trusted_dispatch_history.for_incident(incident_id)] if incident_id else [],
             "field_intervention_evidence": state.get("field_intervention_evidence", {}),
             "active_playbook": state.get("active_playbook", {}),
             "trace": state.get("trace", []), "events": state.get("events", []),
             "learning": state.get("learning", {}),
         }
+
+    @staticmethod
+    def _supervisory_safe(value: Any) -> Any:
+        """Defence in depth for data sent to the separate supervisory UI."""
+        blocked = {"authorization_url", "oauth_state", "code", "access_token", "api_token", "client_secret", "phone_number"}
+        if isinstance(value, dict):
+            return {
+                key: HarisAgentSystem._supervisory_safe(item)
+                for key, item in value.items()
+                if key.lower() not in blocked
+            }
+        if isinstance(value, list):
+            return [HarisAgentSystem._supervisory_safe(item) for item in value]
+        return value
+
+    @property
+    def current_supervisory_status(self) -> Dict[str, Any]:
+        """Backend-owned, sanitized state for a remote Streamlit supervisor.
+
+        The single-instance prototype deliberately keeps this in the Render
+        process.  It is not an OAuth handoff and never includes a consent URL.
+        """
+        cycle = self.current_cycle_status
+        dispatch = cycle.get("trusted_dispatch", {})
+        active = (
+            cycle.get("incident", {})
+            if dispatch.get("status") in {"WAITING_FOR_IDENTITY_VERIFICATION", "MANUAL_INTERVENTION_REQUIRED"}
+            else {}
+        )
+        records = [self.memory.normalized_view(item) for item in self.memory.recent_incidents()]
+        return self._supervisory_safe({
+            "cycle": cycle,
+            "active_incident": active,
+            "dispatch_history": cycle.get("dispatch_history", []),
+            "audit": {
+                "chain": self.memory.verify_audit_chain(),
+                "records": records,
+            },
+        })
+
+    async def _record_dispatch_transition(self, message: str) -> None:
+        """Append a safe backend audit checkpoint after callback continuation.
+
+        The original waiting cycle has already reached LEARN.  A callback is a
+        later server-side transition, so it gets a new chained record rather
+        than mutating the original record and invalidating its hash.
+        """
+        state = self._latest_cycle
+        if not state.get("incident"):
+            return
+        self._trace(state, f"TRUST_CHECK: {message}")
+        incident = Incident(**state["incident"])
+        dispatch = self.current_dispatch_status
+        record = IncidentMemory(
+            incident_id=incident.incident_id,
+            summary=f"Trusted Dispatch transition for {incident.incident_id}",
+            storm_type="sandstorm",
+            peak_congestion_level=incident.peak_congestion_level,
+            peak_confidence_level=incident.peak_confidence_level,
+            affected_cells=incident.affected_cells,
+            affected_devices=incident.affected_devices,
+            actions=[item.get("kind") for item in state.get("plan", {}).get("actions", [])],
+            executed_actions=[item.get("kind") for item in state.get("execution", {}).get("actions", [])],
+            outcome=dispatch.get("status", state.get("final_status", "unknown")).lower(),
+            cycle_id=state.get("cycle_id"),
+            mode=self.settings.nac_mode,
+            audit={
+                "incident": state.get("incident", {}),
+                "trusted_dispatch": dispatch,
+                "dispatch_history": [item.model_dump() for item in trusted_dispatch_history.for_incident(incident.incident_id)],
+                "events": state.get("events", []),
+                "trace": state.get("trace", []),
+                "final_status": state.get("final_status"),
+            },
+            verification=state.get("verification", {}),
+            rollback=state.get("rollback", {}),
+        )
+        await self.memory.remember_incident(record)
 
     def _init_crewai_agents(self) -> None:
         if not CREWAI_AVAILABLE:
@@ -953,6 +1033,11 @@ class HarisAgentSystem:
         self._latest_dispatch = {"pending_id": pending.pending_id, "incident_id": pending.incident_id, "engineer_id": pending.engineer_id, "masked_phone_number": mask_phone_number(pending.phone_number), **trust, "status": status}
         if status == "BLOCKED":
             await self._start_fallback(pending, "Previous engineer blocked; awaiting fallback engineer consent.")
+        await self._record_dispatch_transition(
+            f"engineer={pending.engineer_id}; number_verification=VERIFIED; "
+            f"sim_swap={trusted_dispatch_history.for_incident(pending.incident_id)[-1].sim_swap_status}; "
+            f"warden={trust['decision']}"
+        )
 
     async def _handle_number_verification_failure(self, pending: PendingDispatch) -> None:
         """Retire only the verified-false engineer before a fresh fallback."""
@@ -966,6 +1051,9 @@ class HarisAgentSystem:
         ))
         self._latest_dispatch = {"pending_id": pending.pending_id, "incident_id": pending.incident_id, "engineer_id": pending.engineer_id, "masked_phone_number": mask_phone_number(pending.phone_number), "decision": "BLOCK", "status": "BLOCKED", "number_verified": False, "recent_sim_swap": None, "reason": "Nokia Number Verification returned not verified."}
         await self._start_fallback(pending, "Previous engineer was not verified; awaiting fallback engineer consent.")
+        await self._record_dispatch_transition(
+            f"engineer={pending.engineer_id}; number_verification=NOT_VERIFIED; warden=BLOCK"
+        )
 
     async def _start_fallback(self, pending: PendingDispatch, reason: str) -> None:
         frontend_consent_tokens.invalidate_pending(pending.pending_id)

@@ -89,6 +89,10 @@ class MemoryStore:
 
     async def remember_incident(self, incident: IncidentMemory) -> None:
         # Hash chain makes local append-only history tamper-evident, not immutable.
+        # The graph continues appending trace/events after LEARN.  Freeze a deep
+        # snapshot so those later in-memory mutations cannot alter a record
+        # after its hash has been calculated.
+        incident = incident.model_copy(deep=True)
         previous = self._incidents[-1].record_hash if self._incidents else None
         payload = incident.model_dump(exclude={"previous_hash", "record_hash"})
         canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
