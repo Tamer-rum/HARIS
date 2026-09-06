@@ -1524,7 +1524,7 @@ def render_controls() -> None:
         unsafe_allow_html=True,
     )
 
-    a, d = st.columns([1.35, 2.0])
+    a, b, d = st.columns([1.35, 1.35, 2.0])
 
     with a:
         if st.button(
@@ -1558,6 +1558,22 @@ def render_controls() -> None:
                     st.error(
                         f"HARIS cycle failed: {exc}"
                     )
+
+    with b:
+        if settings.nac_mode == "fixture" and st.button(
+            "RUN FIELD INTERVENTION DEMO",
+            use_container_width=True,
+            help="SIMULATED FIXTURE evidence: a tower power condition requires privileged physical intervention.",
+        ):
+            with st.spinner("HARIS is running the simulated physical-intervention workflow…"):
+                start = time.perf_counter()
+                try:
+                    st.session_state.last_result = run_async(get_system().run_field_intervention_demo())
+                    st.session_state.last_elapsed = time.perf_counter() - start
+                    st.rerun()
+                except Exception as exc:
+                    logger.exception("HARIS field intervention demo failed")
+                    st.error(f"Field intervention demo failed: {exc}")
 
     with d:
         elapsed = st.session_state.get("last_elapsed")

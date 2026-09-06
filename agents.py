@@ -88,6 +88,8 @@ class HarisState(TypedDict, total=False):
     field_intervention_required: bool
     field_intervention_site: Optional[str]
     field_intervention_skills: List[str]
+    field_intervention_reason: Optional[str]
+    field_intervention_evidence: Dict[str, Any]
     trusted_dispatch: Dict[str, Any]
     explanation: str
     error: Optional[str]
@@ -628,6 +630,10 @@ class HarisAgentSystem:
             # Routine autonomous QoD/geofence/slice remediation never reaches
             # Number Verification or SIM Swap.
             if state.get("field_intervention_required"):
+                self._trace(
+                    state,
+                    "FIELD_INTERVENTION_REQUIRED: simulated fixture site condition requires an authorized engineer; network-only remediation is insufficient",
+                )
                 trust = await self._evaluate_field_intervention(state)
                 state["trusted_dispatch"] = trust
                 self._trace(state, f"TRUST_CHECK: decision={trust['decision']}; status={trust['status']}")
@@ -883,7 +889,7 @@ class HarisAgentSystem:
             return {"decision": "BLOCK", "status": "NO_ELIGIBLE_ENGINEER", "reason": "No eligible authorised engineer is available.", "attempts": len(attempted)}
 
         engineer = candidates[0]
-        base = {"engineer_id": engineer.engineer_id, "engineer_name": engineer.name, "masked_phone_number": mask_phone_number(engineer.phone_number), "site": site}
+        base = {"engineer_id": engineer.engineer_id, "engineer_name": engineer.name, "masked_phone_number": mask_phone_number(engineer.phone_number), "site": site, "intervention_reason": state.get("field_intervention_reason") or "Physical inspection required.", "evidence_source": "FIXTURE / SIMULATED DEMO" if self.settings.nac_mode == "fixture" else "OPERATIONAL POLICY"}
         if not verified_identities.is_fresh(engineer.phone_number, self.settings.trusted_dispatch_verification_ttl_seconds):
             pending = pending_dispatches.create(
                 incident_id=incident_id, engineer_id=engineer.engineer_id, phone_number=engineer.phone_number,
@@ -2213,6 +2219,7 @@ class HarisAgentSystem:
             mode=self.settings.nac_mode,
             audit={
                 "environment": {"dust_advisory": state.get("dust_advisory"), "source": state.get("environmental_source")},
+                "field_intervention_evidence": state.get("field_intervention_evidence", {}),
                 "congestion": state.get("congestion", []),
                 "prediction": state.get("prediction", {}),
                 "incident": state.get("incident", {}),
@@ -2277,6 +2284,7 @@ class HarisAgentSystem:
         field_intervention_required: bool = False,
         field_intervention_site: Optional[str] = None,
         field_intervention_skills: Optional[List[str]] = None,
+        field_intervention_reason: Optional[str] = None,
     ) -> HarisState:
        
         initial: HarisState = {
@@ -2287,7 +2295,28 @@ class HarisAgentSystem:
             "field_intervention_required": field_intervention_required,
             "field_intervention_site": field_intervention_site,
             "field_intervention_skills": field_intervention_skills or [],
+            "field_intervention_reason": field_intervention_reason,
+            "field_intervention_evidence": (
+                {
+                    "source": "FIXTURE / SIMULATED DEMO",
+                    "kind": "site_power_reserve_critical",
+                    "reason": field_intervention_reason or "Physical inspection required.",
+                    "note": "This is HARIS fixture evidence, not a Nokia Network as Code measurement.",
+                } if field_intervention_required else {}
+            ),
         }
 
         result = await self.graph.ainvoke(initial)
         return result
+
+    async def run_field_intervention_demo(self) -> HarisState:
+        """Fixture-only demo of a physical condition beyond Nokia network APIs."""
+        if self.settings.nac_mode != "fixture":
+            raise RuntimeError("Field Intervention Demo is available only in FIXTURE mode.")
+        return await self.run_cycle(
+            dust_advisory=True,
+            field_intervention_required=True,
+            field_intervention_site="T03",
+            field_intervention_skills=["tower-inspection", "power"],
+            field_intervention_reason="Simulated critical tower power reserve requires physical inspection.",
+        )

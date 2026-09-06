@@ -17,6 +17,7 @@ class AutonomousDispatchTests(unittest.TestCase):
             gemini_api_key=None, groq_api_key=None,
         )
         trusted_dispatch_history._attempts = []
+        verified_identities._verified_at = {}
 
     def system(self):
         return HarisAgentSystem(FixtureNokiaClient(self.settings), settings=self.settings)
@@ -74,6 +75,24 @@ class AutonomousDispatchTests(unittest.TestCase):
         self.assertIn("High congestion", text)
         self.assertIn("Simulated fixture evidence", text)
         self.assertNotIn("latency", text.lower())
+
+    def test_fixture_field_intervention_demo_requires_dispatch_and_labels_evidence(self):
+        system = self.system()
+        result = asyncio.run(system.run_field_intervention_demo())
+        self.assertEqual(result["final_status"], "waiting_for_identity_verification")
+        self.assertEqual(result["trusted_dispatch"]["engineer_id"], "eng-demo-01")
+        evidence = result["field_intervention_evidence"]
+        self.assertEqual(evidence["source"], "FIXTURE / SIMULATED DEMO")
+        self.assertIn("not a Nokia", evidence["note"])
+        self.assertTrue(any("FIELD_INTERVENTION_REQUIRED" in line for line in result["trace"]))
+        record = system.memory.recent_incidents()[0]
+        self.assertEqual(record.audit["field_intervention_evidence"]["source"], "FIXTURE / SIMULATED DEMO")
+
+    def test_field_intervention_demo_is_unavailable_outside_fixture_mode(self):
+        settings = self.settings.model_copy(update={"nac_mode": "live_read_only"})
+        system = HarisAgentSystem(FixtureNokiaClient(settings), settings=settings)
+        with self.assertRaises(RuntimeError):
+            asyncio.run(system.run_field_intervention_demo())
 
 
 if __name__ == "__main__":
