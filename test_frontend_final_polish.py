@@ -69,6 +69,14 @@ class FinalFrontendPolishTests(unittest.TestCase):
         store._incidents[0].outcome = "tampered"
         self.assertFalse(store.verify_audit_chain()["valid"])
 
+    def test_09_deployed_autonomous_run_uses_backend_authority_with_local_fallback(self):
+        controls_start = self.source.index("def render_controls()")
+        controls = self.source[controls_start:self.source.index("def render_", controls_start + 4)]
+        self.assertIn('backend_request("POST", "/api/nac/autonomous/run")', controls)
+        self.assertIn("if settings.haris_backend_url:", controls)
+        self.assertIn("result = payload[\"cycle\"]", controls)
+        self.assertIn("get_system().run_cycle(", controls)
+
 
 if __name__ == "__main__":
     unittest.main()

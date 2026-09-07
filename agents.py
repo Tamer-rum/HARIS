@@ -306,7 +306,11 @@ class HarisAgentSystem:
     @staticmethod
     def _supervisory_safe(value: Any) -> Any:
         """Defence in depth for data sent to the separate supervisory UI."""
-        blocked = {"authorization_url", "oauth_state", "code", "access_token", "api_token", "client_secret", "phone_number"}
+        blocked = {
+            "authorization_url", "oauth_state", "code", "access_token",
+            "api_token", "client_secret", "phone_number",
+            "consent_action_token", "workflow_session_token",
+        }
         if isinstance(value, dict):
             return {
                 key: HarisAgentSystem._supervisory_safe(item)

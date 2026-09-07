@@ -1151,6 +1151,21 @@ async def authoritative_field_intervention_demo() -> Dict[str, Any]:
     return {"cycle": system.current_cycle_status, "consent_action_token": action_token, "workflow_session_token": workflow_token}
 
 
+@router.post("/autonomous/run")
+async def authoritative_autonomous_run() -> Dict[str, Any]:
+    """Run one standard cycle in the backend-owned HARIS authority.
+
+    This endpoint deliberately accepts no operator-controlled safety, network,
+    or dispatch inputs.  Any privileged intervention remains a graph/WARDEN
+    decision, rather than a request parameter.
+    """
+    system = _authoritative_haris_system()
+    await system.run_cycle(dust_advisory=True)
+    # A cycle is rendered by the separate Streamlit supervisor, so apply the
+    # same defence-in-depth redaction used by the authoritative status view.
+    return {"cycle": system._supervisory_safe(system.current_cycle_status)}
+
+
 @router.get("/autonomous/status")
 async def authoritative_autonomous_status() -> Dict[str, Any]:
     """Sanitized backend-owned supervisor state; never an OAuth handoff."""

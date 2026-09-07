@@ -207,6 +207,69 @@ class DispatchContinuationTests(unittest.TestCase):
         self.assertEqual(wrong.status_code, 403)
         self.assertEqual(refreshed.status_code, 200)
 
+    def test_backend_authoritative_standard_run_uses_shared_system_and_sanitizes_cycle(self):
+        class BackendSystem:
+            settings = AppSettings(nac_mode="fixture")
+            current_cycle_status = {
+                "cycle_id": "cycle-authoritative",
+                "final_status": "mitigated",
+                "incident": {"incident_id": "incident-authoritative"},
+                "trace": ["SENSE: fixture cycle complete"],
+                "authorization_url": "https://nokia.example/never-return",
+                "trusted_dispatch": {
+                    "oauth_state": "never-return",
+                    "consent_action_token": "never-return-token",
+                    "workflow_session_token": "never-return-session",
+                },
+            }
+
+            def __init__(self):
+                self.calls = []
+
+            async def run_cycle(self, *, dust_advisory):
+                self.calls.append(dust_advisory)
+
+            @staticmethod
+            def _supervisory_safe(value):
+                blocked = {
+                    "authorization_url", "oauth_state", "code", "access_token",
+                    "api_token", "client_secret", "phone_number",
+                    "consent_action_token", "workflow_session_token",
+                }
+                if isinstance(value, dict):
+                    return {key: BackendSystem._supervisory_safe(item) for key, item in value.items() if key.lower() not in blocked}
+                if isinstance(value, list):
+                    return [BackendSystem._supervisory_safe(item) for item in value]
+                return value
+
+        backend = BackendSystem()
+        register_dispatch_system_factory(lambda: backend)
+        with TestClient(api_app) as client:
+            response = client.post("/api/nac/autonomous/run")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(backend.calls, [True])
+        cycle = response.json()["cycle"]
+        self.assertEqual(cycle["cycle_id"], "cycle-authoritative")
+        rendered = str(cycle)
+        for sensitive in ("authorization_url", "oauth_state", "consent_action_token", "workflow_session_token", "https://nokia.example/never-return", "never-return"):
+            self.assertNotIn(sensitive, rendered)
+
+    def test_backend_authoritative_standard_run_executes_fixture_cycle_and_audits_it(self):
+        settings = AppSettings(nac_mode="fixture", fixture_dir="fixtures", gemini_api_key=None, groq_api_key=None)
+        memory = MemoryStore(settings)
+        memory._incidents = []
+        memory._save_local = lambda: None
+        backend = HarisAgentSystem(FixtureNokiaClient(settings), memory=memory, settings=settings)
+        register_dispatch_system_factory(lambda: backend)
+        with TestClient(api_app) as client:
+            response = client.post("/api/nac/autonomous/run")
+        self.assertEqual(response.status_code, 200)
+        cycle = response.json()["cycle"]
+        self.assertEqual(cycle["final_status"], "mitigated")
+        self.assertEqual(cycle["incident"]["affected_cells"], ["T02", "T03", "T05"])
+        self.assertEqual(memory.count(), 1)
+        self.assertTrue(memory.verify_audit_chain()["valid"])
+
     def test_backend_supervisory_status_keeps_waiting_incident_and_audits_callback_transition(self):
         settings = AppSettings(nac_mode="fixture", fixture_dir="fixtures", nac_api_token="test", gemini_api_key=None, groq_api_key=None)
         memory = MemoryStore(settings); memory._incidents = []; memory._save_local = lambda: None

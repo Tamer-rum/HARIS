@@ -1810,11 +1810,22 @@ def render_controls() -> None:
                 start = time.perf_counter()
 
                 try:
-                    result = run_async(
-                        get_system().run_cycle(
-                            dust_advisory=True
+                    # Deployed console: Render owns autonomous execution and
+                    # durable audit history.  Standalone console: retain the
+                    # local fixture-only fallback for development/demo use.
+                    if settings.haris_backend_url:
+                        payload = run_async(
+                            backend_request("POST", "/api/nac/autonomous/run")
                         )
-                    )
+                        if not payload or not isinstance(payload.get("cycle"), dict):
+                            raise RuntimeError("Authoritative HARIS backend did not return a cycle.")
+                        result = payload["cycle"]
+                    else:
+                        result = run_async(
+                            get_system().run_cycle(
+                                dust_advisory=True
+                            )
+                        )
 
                     st.session_state.last_result = result
                     st.session_state.last_elapsed = (
