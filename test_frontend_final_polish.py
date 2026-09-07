@@ -105,6 +105,28 @@ class FinalFrontendPolishTests(unittest.TestCase):
         self.assertEqual(app.authoritative_verification_label({}), "N/A")
         self.assertTrue(math.isnan(app.optional_float(None)))
 
+    def test_13_operational_evidence_never_falls_back_to_fixture_rows(self):
+        self.assertEqual(app.congestion_map(None), {})
+        payload = {
+            "congestion": [{"cell_id": "T03", "congestion_level": "Low", "congestion_pct": None, "latency_ms": None, "predicted_congestion_pct": None}],
+            "pre_execution_congestion": {"T03": {"congestion_level": "Medium", "congestion_pct": None, "latency_ms": None, "predicted_congestion_pct": None}},
+        }
+        current, baseline = app.congestion_map(payload), app.baseline_map(payload)
+        self.assertEqual(current["T03"]["congestion_level"], "Low")
+        self.assertEqual(baseline["T03"]["congestion_level"], "Medium")
+        self.assertTrue(math.isnan(current["T03"]["latency_ms"]))
+        self.assertTrue(math.isnan(current["T03"]["predicted_congestion_pct"]))
+        changed = {"congestion": [{"cell_id": "T99", "congestion_level": "High"}]}
+        self.assertEqual(set(app.congestion_map(changed)), {"T99"})
+
+    def test_14_impact_uses_categorical_authoritative_evidence(self):
+        impact_start = self.source.index("def render_impact(")
+        impact = self.source[impact_start:self.source.index("def render_", impact_start + 4)]
+        self.assertIn("CONGESTION · {safe_text(target)}", impact)
+        self.assertIn("IMPROVED", impact)
+        self.assertIn("available_kpis", impact)
+        self.assertNotIn("fixture(\"congestion\"", impact)
+
 
 if __name__ == "__main__":
     unittest.main()

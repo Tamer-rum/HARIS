@@ -790,7 +790,9 @@ def optional_float(value: Any) -> float:
 
 
 def congestion_map(result: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, float]]:
-    rows = (result or {}).get("congestion") or fixture("congestion", [])
+    # Never hydrate an operational view from fixture files. A fixture value is
+    # visible only when it belongs to the current authoritative fixture cycle.
+    rows = safe_mapping(result).get("congestion") or []
 
     output: Dict[str, Dict[str, float]] = {}
 
@@ -800,6 +802,7 @@ def congestion_map(result: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, floa
             continue
 
         output[cell_id] = {
+            "congestion_level": row.get("congestion_level"),
             "congestion_pct": optional_float(row.get("congestion_pct")),
             "latency_ms": optional_float(row.get("latency_ms")),
             "predicted_congestion_pct": optional_float(row.get("predicted_congestion_pct")),
@@ -814,6 +817,7 @@ def baseline_map(result: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, float]
     if isinstance(raw, dict):
         return {
             cell: {
+                "congestion_level": values.get("congestion_level"),
                 "congestion_pct": optional_float(values.get("congestion_pct")),
                 "latency_ms": optional_float(values.get("latency_ms")),
                 "predicted_congestion_pct": optional_float(values.get("predicted_congestion_pct")),
@@ -824,6 +828,7 @@ def baseline_map(result: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, float]
     if isinstance(raw, list):
         return {
             row["cell_id"]: {
+                "congestion_level": row.get("congestion_level"),
                 "congestion_pct": optional_float(row.get("congestion_pct")),
                 "latency_ms": optional_float(row.get("latency_ms")),
                 "predicted_congestion_pct": optional_float(row.get("predicted_congestion_pct")),
@@ -832,7 +837,7 @@ def baseline_map(result: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, float]
             if row.get("cell_id")
         }
 
-    return congestion_map(None)
+    return {}
 
 
 def tower_state(
@@ -946,7 +951,7 @@ def render_capability_matrix(result: Optional[Dict[str, Any]]) -> None:
 
 
 def render_environment(result: Optional[Dict[str, Any]]) -> None:
-    source = (result or {}).get("environmental_source", "FIXTURE" if settings.nac_mode == "fixture" else "UNAVAILABLE")
+    source = safe_mapping(result).get("environmental_source") or "UNAVAILABLE"
     st.caption(f"ENVIRONMENT SOURCE: {source}")
     st.markdown(
         '<div class="section-title"><span class="section-mark warning">△</span><span>ENVIRONMENTAL THREAT STATE</span></div>',
@@ -963,38 +968,38 @@ def render_prediction(result: Optional[Dict[str, Any]]) -> None:
     a, b, c, d = st.columns(4)
     with a: render_html(operational_card("Predicted Risk", safe_upper(prediction.get("predicted_risk_level"), "N/A")))
     with b: render_html(operational_card("Forecast Horizon", f"{prediction.get('horizon_minutes', 'N/A')} min", "Forecast window"))
-    with c: render_html(operational_card("Confidence", f"{float(prediction.get('confidence', 0)) * 100:.0f}%", "Model confidence"))
-    with d: render_html(operational_card("Degradation Probability", f"{float(prediction.get('degradation_probability', 0)) * 100:.0f}%", "Forecast probability"))
+    with c: render_html(operational_card("Confidence", authoritative_metric(prediction.get("confidence"), kind="confidence"), "Model confidence"))
+    with d: render_html(operational_card("Degradation Probability", authoritative_metric(prediction.get("degradation_probability"), kind="confidence"), "Forecast probability"))
     st.caption("Top factors: " + "; ".join(prediction.get("contributing_factors", [])))
 
     incident = (result or {}).get("incident", {})
     affected_cells = incident.get("affected_cells", [])
 
-    cells_text = ", ".join(affected_cells) if affected_cells else "Monitoring"
+    cells_text = ", ".join(affected_cells) if affected_cells else "N/A"
 
     cards = [
         (
-            "Dust Density",
-            "HIGH",
-            "Storm advisory ACTIVE",
+            "Dust Advisory",
+            "ACTIVE" if safe_mapping(result).get("dust_advisory") is True else "CLEAR" if safe_mapping(result).get("dust_advisory") is False else "UNAVAILABLE",
+            f"{safe_upper(safe_mapping(result).get('environmental_source'), 'UNAVAILABLE')} evidence source",
             "#ff4d5f",
         ),
         (
             "Temperature",
-            "47°C",
-            "Extreme heat condition",
+            "UNAVAILABLE",
+            "No authoritative temperature feed configured",
             "#ffc857",
         ),
         (
             "Visibility",
-            "LOW",
-            "Desert visibility degradation",
+            "UNAVAILABLE",
+            "No authoritative visibility feed configured",
             "#ffc857",
         ),
         (
             "Affected Cells",
             cells_text,
-            "Detected by Sentinel",
+            "Current authoritative incident evidence",
             "#ff6b78",
         ),
     ]
@@ -1062,8 +1067,8 @@ def topology_svg(
         x2, y2 = positions[target]
 
         values = [
-            data.get(source, {}).get("congestion_pct", 0),
-            data.get(target, {}).get("congestion_pct", 0),
+            data.get(source, {}).get("congestion_pct", math.nan),
+            data.get(target, {}).get("congestion_pct", math.nan),
         ]
 
         observed_congestion = [value for value in values if math.isfinite(value)]
@@ -1092,21 +1097,6 @@ def topology_svg(
             """
         )
 
-        if active:
-            duration = 1.45 + (index % 4) * .25
-
-            link_parts.append(
-                f"""
-                <circle r="4" fill="{color}" opacity=".95">
-                    <animateMotion
-                        dur="{duration}s"
-                        repeatCount="indefinite"
-                        path="M{x1},{y1} L{x2},{y2}"
-                    />
-                </circle>
-                """
-            )
-
     node_parts: List[str] = []
 
     for name, (x, y) in positions.items():
@@ -1116,8 +1106,8 @@ def topology_svg(
             fill = "#10273a"
             sub = "NETWORK CORE"
         else:
-            congestion = data.get(name, {}).get("congestion_pct", 0)
-            latency = data.get(name, {}).get("latency_ms", 0)
+            congestion = data.get(name, {}).get("congestion_pct", math.nan)
+            latency = data.get(name, {}).get("latency_ms", math.nan)
 
             status, key = tower_state(congestion, latency)
 
@@ -1131,7 +1121,7 @@ def topology_svg(
             stroke, fill = colors[key]
             if not math.isfinite(congestion):
                 status = "KPI UNAVAILABLE"
-            sub = f"{status} · {congestion:.0f}%"
+            sub = f"{status} · {congestion:.0f}%" if math.isfinite(congestion) else status
 
         if name != "CORE" and status != "HEALTHY":
             pulse = f"""
@@ -1234,7 +1224,7 @@ def topology_svg(
     return textwrap.dedent(f"""
     <div class="panel" style="padding:8px 8px 3px;">
         <div class="panel-title">
-            LIVE NETWORK FABRIC · DATA FLOW
+            NETWORK FABRIC · CURRENT EVIDENCE
         </div>
 
         <div style="
@@ -1242,8 +1232,7 @@ def topology_svg(
             font-size:.60rem;
             margin:3px 0 5px;
         ">
-            Cyan = healthy · Amber = degraded · Red = critical ·
-            moving dots = simulated traffic flow
+            Cyan = healthy · Amber = degraded · Red = critical · Gray = unavailable
         </div>
 
         <svg
@@ -1321,16 +1310,18 @@ def render_network_section(
 
         for cell_id, values in sorted(data.items()):
             congestion = values["congestion_pct"]
+            level = values.get("congestion_level")
 
-            if congestion >= 70:
+            if congestion >= 70 or level in {"High", "Medium"}:
                 status_class = "badge-red" if congestion >= 75 else "badge-yellow"
-                status = "CRITICAL" if congestion >= 75 else "AT RISK"
+                status = "CRITICAL" if congestion >= 75 or level == "High" else "AT RISK"
+                evidence = f"{congestion:.0f}%" if math.isfinite(congestion) else f"{level} categorical"
 
                 rows += f"""
                 <div class="row">
                     <span><b>{cell_id}</b> · congestion</span>
                     <span class="badge {status_class}">
-                        {congestion:.0f}% · {status}
+                        {evidence} · {status}
                     </span>
                 </div>
                 """
@@ -1338,8 +1329,8 @@ def render_network_section(
         if not rows:
             rows = """
             <div class="row">
-                <span>Network fabric</span>
-                <span class="badge badge-green">HEALTHY</span>
+                <span>Network alerts</span>
+                <span class="badge badge-gray">WAITING FOR EVIDENCE</span>
             </div>
             """
 
@@ -1354,12 +1345,12 @@ def render_network_section(
             unsafe_allow_html=True,
         )
 
-        devices = fixture("devices", [])
+        devices = safe_mapping(result).get("devices") or []
         rows = ""
 
         for device in devices:
             tier = device.get("tier")
-            battery = float(device.get("battery_pct", 100))
+            battery = optional_float(device.get("battery_pct"))
 
             if tier == 1 or battery < 25:
                 if tier == 1:
@@ -1381,8 +1372,8 @@ def render_network_section(
         if not rows:
             rows = """
             <div class="row">
-                <span>No critical devices</span>
-                <span class="badge badge-green">CLEAR</span>
+                <span>Critical-device evidence</span>
+                <span class="badge badge-gray">UNAVAILABLE</span>
             </div>
             """
 
@@ -1396,12 +1387,10 @@ def render_network_section(
             unsafe_allow_html=True,
         )
 
-        render_html(
-            topology_svg(
-                data=data,
-                active=bool(result),
-            )
-        )
+        if data:
+            render_html(topology_svg(data=data, active=False))
+        else:
+            render_html('<div class="panel empty-state"><strong>NETWORK TOPOLOGY UNAVAILABLE</strong><br>Waiting for current authoritative congestion evidence.</div>')
 
 
 # ============================================================================
@@ -1455,6 +1444,17 @@ def render_impact(
     before = baseline[target]
     after = current[target]
 
+    before_level = before.get("congestion_level")
+    after_level = after.get("congestion_level")
+    if before_level and after_level:
+        improved = verification.get("level_improved")
+        outcome = "IMPROVED" if improved is True else "DEGRADED" if verification.get("level_degraded") is True else "UNCHANGED"
+        render_html(
+            f'<div class="panel"><div class="panel-title">CONGESTION · {safe_text(target)}</div>'
+            f'<div style="font-size:1.15rem;font-weight:800;color:#eaf8ff">{safe_text(before_level)} → {safe_text(after_level)}</div>'
+            f'<div style="margin-top:5px;color:#70efb6;font-size:.7rem;font-weight:800">{outcome}</div></div>'
+        )
+
     kpis = [
         (
             "Congestion",
@@ -1476,9 +1476,11 @@ def render_impact(
         ),
     ]
 
-    cols = st.columns(3)
+    available_kpis = [item for item in kpis if math.isfinite(item[1]) and math.isfinite(item[2])]
+    if available_kpis:
+        cols = st.columns(len(available_kpis))
 
-    for col, (name, before_value, after_value, suffix) in zip(cols, kpis):
+    for col, (name, before_value, after_value, suffix) in zip(cols if available_kpis else [], available_kpis):
         kpi_available = math.isfinite(before_value) and math.isfinite(after_value)
         delta = after_value - before_value if kpi_available else math.nan
 
