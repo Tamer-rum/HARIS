@@ -294,6 +294,29 @@ class HarisCoreTests(unittest.TestCase):
         self.assertEqual(current["final_status"], "no_action_proposed")
         self.assertTrue(client.state["qos"][owned_session]["active"])
 
+    def test_supervisory_cycle_exposes_structured_authoritative_decision_evidence(self):
+        settings = self.settings()
+        system = HarisAgentSystem(FixtureNokiaClient(settings), settings=settings)
+        asyncio.run(system.run_cycle(True))
+        cycle = system.current_cycle_status
+        self.assertEqual(len(cycle["plan"]["actions"]), 2)
+        self.assertTrue(cycle["warden"]["verified"])
+        self.assertTrue(cycle["execution"]["executed"])
+        self.assertTrue(cycle["verification"]["verified"])
+        self.assertIn("T03", cycle["pre_execution_congestion"])
+        self.assertTrue(cycle["devices"])
+        self.assertNotIn("session_id", str(cycle["execution"]))
+
+    def test_actuator_event_types_match_success_and_failure_semantics(self):
+        system = HarisAgentSystem(FixtureNokiaClient(self.settings()), settings=self.settings())
+        state = {"events": [], "trace": [], "incident": {"incident_id": "event-test"}}
+        system._trace(state, "ACTUATOR: QoD created device=ambulance-01")
+        system._trace(state, "ACTUATOR: geofence created device=ambulance-01")
+        system._trace(state, "ACTUATOR: execution failed after 0 actions")
+        self.assertEqual(state["events"][0]["type"], "ACTION_EXECUTED")
+        self.assertEqual(state["events"][1]["type"], "ACTION_EXECUTED")
+        self.assertEqual(state["events"][2]["type"], "ACTION_FAILED")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

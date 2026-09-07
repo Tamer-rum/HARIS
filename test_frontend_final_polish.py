@@ -127,6 +127,21 @@ class FinalFrontendPolishTests(unittest.TestCase):
         self.assertIn("available_kpis", impact)
         self.assertNotIn("fixture(\"congestion\"", impact)
 
+    def test_15_authoritative_cycle_payload_drives_result_metrics_without_defaults(self):
+        cycle = {
+            "plan": {"confidence": .89, "blast_radius": .12, "expected_cost_usd": .75, "actions": [{}, {}]},
+            "execution": {"executed": True, "actions": [{"device_id": "ambulance-01"}, {"device_id": "ambulance-01"}]},
+            "verification": {"verified": True, "target_cells": ["T03"], "level_improved": True},
+            "devices": [{"device_id": "ambulance-01", "tier": 1}],
+        }
+        self.assertEqual(app.authoritative_metric(cycle["plan"]["confidence"], kind="confidence"), "89%")
+        self.assertEqual(app.authoritative_metric(cycle["plan"]["blast_radius"], kind="blast_radius"), "12%")
+        self.assertEqual(app.authoritative_metric(cycle["plan"]["expected_cost_usd"], kind="qod_cost"), "$0.75")
+        self.assertEqual(app.authoritative_metric(cycle["plan"]["actions"], kind="actions"), "2")
+        self.assertEqual(app.authoritative_verification_label(cycle["verification"]), "PASSED")
+        self.assertEqual(app.protected_tier1_count(cycle), "1")
+        self.assertEqual(app.protected_tier1_count({"execution": {"actions": []}}), "N/A")
+
 
 if __name__ == "__main__":
     unittest.main()

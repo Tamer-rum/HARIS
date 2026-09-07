@@ -75,6 +75,18 @@ def authoritative_verification_label(verification: Dict[str, Any]) -> str:
     return "PASSED" if verification["verified"] is True else "REVIEW"
 
 
+def protected_tier1_count(result: Dict[str, Any]) -> str:
+    """Count only current-cycle executed actions targeting observed tier-1 devices."""
+    execution = safe_mapping(result.get("execution"))
+    actions = execution.get("actions")
+    devices = result.get("devices")
+    if not isinstance(actions, list) or not isinstance(devices, list):
+        return "N/A"
+    tier1 = {safe_mapping(item).get("device_id") for item in devices if safe_mapping(item).get("tier") == 1}
+    targeted = {safe_mapping(action).get("device_id") for action in actions}
+    return str(len((tier1 & targeted) - {None}))
+
+
 def safe_upper(value: Any, fallback: str) -> str:
     """Format optional API strings without displaying a literal ``None``."""
     return str(value or fallback).upper()
@@ -1679,13 +1691,7 @@ def render_decision_engine(
             "success": "#42f59b", "warning": "#ffc857", "danger": "#ff6170", "neutral": "#63d9ff",
         }[semantic_tone(status)]
 
-        protected = len(
-            [
-                action
-                for action in plan.get("actions") or []
-                if safe_mapping(action).get("kind") == "slice_attach"
-            ]
-        )
+        protected = protected_tier1_count(result)
 
         render_html(
             f"""
@@ -1730,14 +1736,14 @@ def render_decision_engine(
                     margin:10px 0;
                 "></div>
 
-                <div class="panel-title">AUDIT</div>
+                <div class="panel-title">OUTCOME</div>
 
                 <div style="
                     color:{status_color};
                     font-weight:800;
                     font-size:.82rem;
                 ">
-                    {"VERIFIED" if verification.get("verified") else "REVIEW"}
+                    {"VERIFIED" if verification.get("verified") is True else "REVIEW" if "verified" in verification else "N/A"}
                 </div>
             </div>
             """

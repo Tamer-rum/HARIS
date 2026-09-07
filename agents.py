@@ -296,12 +296,29 @@ class HarisAgentSystem:
         return {
             "cycle_id": state.get("cycle_id"), "final_status": state.get("final_status"),
             "incident": state.get("incident", {}), "prediction": state.get("prediction", {}),
+            # These are the structured authoritative facts needed by the
+            # supervisory console; action/session internals remain excluded.
+            "plan": state.get("plan", {}),
+            "warden": state.get("warden", {}),
+            "execution": {
+                "executed": state.get("execution", {}).get("executed"),
+                "reason": state.get("execution", {}).get("reason"),
+                "actions": [
+                    {key: value for key, value in action.items() if key not in {"session_id", "subscription_id"}}
+                    for action in state.get("execution", {}).get("actions", [])
+                ],
+            },
+            "verification": state.get("verification", {}),
+            "rollback": state.get("rollback", {}),
+            "learning": state.get("learning", {}),
+            "congestion": state.get("congestion", []),
+            "pre_execution_congestion": state.get("pre_execution_congestion", {}),
+            "devices": state.get("devices", []),
             "trusted_dispatch": self.current_dispatch_status,
             "dispatch_history": [item.model_dump() for item in trusted_dispatch_history.for_incident(incident_id)] if incident_id else [],
             "field_intervention_evidence": state.get("field_intervention_evidence", {}),
             "active_playbook": state.get("active_playbook", {}),
             "trace": state.get("trace", []), "events": state.get("events", []),
-            "learning": state.get("learning", {}),
         }
 
     @staticmethod
@@ -649,10 +666,11 @@ class HarisAgentSystem:
         state.setdefault("trace", []).append(f"{time.strftime('%H:%M:%S')} | {message}")
         stage = message.split(":", 1)[0].strip().upper()
         pending = "pending" in message.lower() or "waiting for consent" in message.lower()
+        actuator_success = any(token in message.lower() for token in (" created", " attached", " detached", " released", " deleted", " executed"))
         event_type = {
             "SENTINEL": "SENSE", "CARTOGRAPHER": "REASON", "TRIAGE": "ACTION_PROPOSED",
             "WARDEN": "WARDEN_APPROVED" if "approved" in message else "WARDEN_BLOCKED",
-            "ACTUATOR": "ACTION_EXECUTED" if "executed" in message else "ACTION_FAILED",
+            "ACTUATOR": "ACTION_EXECUTED" if actuator_success else "ACTION_FAILED",
             "VERIFY": "VERIFY", "ROLLBACK": "ROLLBACK", "LEARN": "LEARN",
         }.get(stage, stage)
         if pending and stage in {"WARDEN", "ACTUATOR", "TRUST_CHECK"}:
