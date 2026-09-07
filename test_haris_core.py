@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from agents import HarisAgentSystem, RemediationPlan
 from config import AppSettings, GeofenceArea
+from memory import MemoryStore
 from nokia_clients import FixtureNokiaClient, LiveNokiaClient
 from playbooks import Action, PlaybookEngine
 
@@ -215,6 +216,83 @@ class HarisCoreTests(unittest.TestCase):
         self.assertFalse(result["warden"]["verified"])
         self.assertEqual(result["verification"]["status"], "no_action_proposed")
         self.assertEqual(result["final_status"], "no_action_proposed")
+
+    def test_energy_guard_requires_sustained_timestamped_high_congestion(self):
+        settings = self.settings(energy_guard_sustained_congestion_seconds=600)
+        client = FixtureNokiaClient(settings)
+        engine = PlaybookEngine(settings, client, memory=None)
+        congestion = asyncio.run(client.congestion_insights())
+        devices = asyncio.run(client.device_status(settings.registered_devices))
+        now = 10_000.0
+        isolated = {"T05": [{"observed_at": now, "congestion_level": "High"}]}
+        self.assertEqual(engine.energy_guard(congestion, devices, isolated, observed_at=now), [])
+        sustained = {"T05": [{"observed_at": now - offset, "congestion_level": "High"} for offset in range(600, -1, -60)]}
+        self.assertTrue(engine.energy_guard(congestion, devices, sustained, observed_at=now))
+        recovered = {"T05": [{"observed_at": now - 60, "congestion_level": "High"}, {"observed_at": now, "congestion_level": "Low"}]}
+        self.assertEqual(engine.energy_guard(congestion, devices, recovered, observed_at=now), [])
+        self.assertEqual(engine.energy_guard(congestion, devices, {"T05": [{"observed_at": now - 3600, "congestion_level": "High"}, {"observed_at": now, "congestion_level": "High"}]}, observed_at=now), [])
+        self.assertEqual(engine.energy_guard(congestion, devices, {"T05": [{"observed_at": "bad", "congestion_level": "High"}]}, observed_at=now), [])
+
+    def test_capacity_harvest_requires_bulk_cohort_and_records_policy_only(self):
+        settings = self.settings(capacity_harvest_min_bulk_devices=2)
+        client = FixtureNokiaClient(settings)
+        engine = PlaybookEngine(settings, client, memory=None)
+        congestion = asyncio.run(client.congestion_insights())
+        devices = asyncio.run(client.device_status(settings.registered_devices))
+        actions = engine.capacity_harvest(congestion, devices)
+        self.assertTrue(actions)
+        self.assertTrue(all(action.parameters["defer_noncritical_uploads"] is True for action in actions))
+        only_one = [device for device in devices if device.device_id not in {"fleet-02", "telemetry-01"}]
+        self.assertFalse(any(action.device_id == "fleet-01" for action in engine.capacity_harvest(congestion, only_one)))
+
+    def test_normalization_releases_only_owned_resources_and_audits_recovery(self):
+        settings = self.settings()
+        client = FixtureNokiaClient(settings)
+        memory = MemoryStore(settings)
+        memory._incidents = []
+        memory._save_local = lambda: None
+        system = HarisAgentSystem(client, memory=memory, settings=settings)
+        asyncio.run(system.run_cycle(True))
+        client.state["qos"]["foreign-session"] = {"active": True}
+        for reading in client.state["network"].values():
+            reading["congestion_level"] = "Low"
+        recovered = asyncio.run(system.recover_normalized_incident(dust_advisory=False))
+        self.assertEqual(recovered["final_status"], "recovered")
+        self.assertTrue(recovered["recovery"]["verified"])
+        self.assertTrue(any(item["operation"] == "release_qos" for item in recovered["recovery"]["actions"]))
+        self.assertTrue(client.state["qos"]["foreign-session"]["active"])
+        self.assertTrue(memory.verify_audit_chain()["valid"])
+        self.assertEqual(memory.recent_incidents()[0].outcome, "recovered")
+
+    def test_failed_normalization_cleanup_is_terminal_and_does_not_loop(self):
+        class FailingReleaseClient(FixtureNokiaClient):
+            async def release_qos(self, session_id):
+                return False
+
+        settings = self.settings()
+        client = FailingReleaseClient(settings)
+        system = HarisAgentSystem(client, settings=settings)
+        asyncio.run(system.run_cycle(True))
+        for reading in client.state["network"].values():
+            reading["congestion_level"] = "Low"
+        failed = asyncio.run(system.recover_normalized_incident(dust_advisory=False))
+        actions = list(failed["recovery"]["actions"])
+        self.assertEqual(failed["final_status"], "recovery_cleanup_failed")
+        self.assertFalse(failed["recovery"]["verified"])
+        self.assertEqual(asyncio.run(system.recover_normalized_incident(dust_advisory=False))["recovery"]["actions"], actions)
+
+    def test_normalization_never_cleans_resources_from_a_previous_incident(self):
+        settings = self.settings()
+        client = FixtureNokiaClient(settings)
+        system = HarisAgentSystem(client, settings=settings)
+        first = asyncio.run(system.run_cycle(True))
+        owned_session = next(item["session_id"] for item in first["execution"]["actions"] if item["kind"] == "qos")
+        for reading in client.state["network"].values():
+            reading["congestion_level"] = "None"
+        asyncio.run(system.run_cycle(False))
+        current = asyncio.run(system.recover_normalized_incident(dust_advisory=False))
+        self.assertEqual(current["final_status"], "no_action_proposed")
+        self.assertTrue(client.state["qos"][owned_session]["active"])
 
 
 if __name__ == "__main__":

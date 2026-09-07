@@ -261,6 +261,7 @@ class HarisAgentSystem:
         register_dispatch_resume_handler(self._resume_pending_dispatch)
         register_dispatch_verification_failure_handler(self._handle_number_verification_failure)
         self._cached_environment: Optional[bool] = None
+        self._congestion_history: Dict[str, List[Dict[str, Any]]] = {}
         self.crewai_agents: Dict[str, Any] = {}
         self._init_crewai_agents()
         self.graph = self._build_graph()
@@ -876,6 +877,14 @@ class HarisAgentSystem:
             x.model_dump()
             for x in congestion
         ]
+        # Factual HARIS observation history used for sustained-congestion
+        # policy. It does not synthesize any Nokia KPI values.
+        observed_at = time.time()
+        for reading in congestion:
+            samples = self._congestion_history.setdefault(reading.cell_id, [])
+            samples.append({"observed_at": observed_at, "congestion_level": reading.congestion_level})
+            del samples[:-64]
+        state["congestion_observed_at"] = observed_at
 
         state["devices"] = [
             x.model_dump()
@@ -1151,6 +1160,8 @@ class HarisAgentSystem:
             state.get("dust_advisory", True),
             congestion,
             devices,
+            self._congestion_history,
+            observed_at=state.get("congestion_observed_at"),
         )
         all_actions: List[Action] = evaluation["actions"]
         state["active_playbook"] = {
@@ -2328,6 +2339,12 @@ class HarisAgentSystem:
         elif state.get("final_status") == "rolled_back_safely":
             outcome = "rolled_back_safely"
 
+        elif state.get("final_status") == "recovered":
+            outcome = "recovered"
+
+        elif state.get("final_status") == "recovery_cleanup_failed":
+            outcome = "recovery_cleanup_failed"
+
         elif state.get("final_status") == "rollback_failed":
             outcome = "rollback_failed"
 
@@ -2387,7 +2404,7 @@ class HarisAgentSystem:
             outcome=outcome,
             cycle_id=state.get("cycle_id"),
             mode=self.settings.nac_mode,
-            checkpoint_type="learn",
+            checkpoint_type="normalization_recovery" if state.get("recovery", {}).get("attempted") else "learn",
             checkpoint_ordinal=0,
             completed_at=(
                 datetime.now(timezone.utc).isoformat()
@@ -2408,6 +2425,7 @@ class HarisAgentSystem:
                 "execution": execution,
                 "verification": verification,
                 "rollback": rollback,
+                "recovery": state.get("recovery", {}),
                 "trace": state.get("trace", []),
                 "events": state.get("events", []),
                 "final_status": state.get("final_status"),
@@ -2497,3 +2515,61 @@ class HarisAgentSystem:
             field_intervention_skills=["tower-inspection", "power"],
             field_intervention_reason="Simulated critical tower power reserve requires physical inspection.",
         )
+
+    async def recover_normalized_incident(self, *, dust_advisory: bool = False) -> Dict[str, Any]:
+        """Release only HARIS-owned temporary resources after normalization.
+
+        This is intentionally separate from rollback: cleanup is permitted only
+        for a previously verified mitigation, a declared clear dust condition,
+        and fresh categorical Nokia evidence showing no Medium/High congestion
+        in the affected incident cells.  It never discovers, adopts, or deletes
+        external operator resources.
+        """
+        state = self._latest_cycle
+        execution = state.get("execution", {})
+        incident = state.get("incident", {})
+        if state.get("recovery", {}).get("attempted"):
+            return state
+        if state.get("final_status") != "mitigated" or not execution.get("executed"):
+            return state
+        if dust_advisory:
+            self._trace(state, "RECOVERY: dust condition remains active; temporary resources retained")
+            return state
+
+        current = await self.client.congestion_insights()
+        affected = set(incident.get("affected_cells", []))
+        normalized = bool(affected) and all(
+            item.congestion_level in {"None", "Low"}
+            for item in current if item.cell_id in affected
+        ) and affected.issubset({item.cell_id for item in current})
+        if not normalized:
+            self._trace(state, "RECOVERY: fresh categorical evidence is not normalized; temporary resources retained")
+            return state
+
+        state["recovery"] = {"attempted": True, "actions": []}
+        successes = True
+        for action in reversed(execution.get("actions", [])):
+            kind, device_id = action.get("kind"), action.get("device_id")
+            try:
+                if kind == "qos" and action.get("session_id"):
+                    success, operation = bool(await self.client.release_qos(action["session_id"])), "release_qos"
+                elif kind == "slice_attach" and device_id and action.get("slice_id"):
+                    result = await self.client.detach_slice(device_id, action["slice_id"])
+                    success, operation = result.attached is False, "detach_slice"
+                elif kind == "geofence" and action.get("subscription_id"):
+                    success, operation = bool(await self.client.delete_geofence(action["subscription_id"])), "delete_geofence"
+                else:
+                    # An incomplete action record cannot prove ownership.
+                    continue
+                state["recovery"]["actions"].append({"kind": kind, "device_id": device_id, "operation": operation, "success": success})
+                successes = successes and success
+            except Exception:
+                successes = False
+                state["recovery"]["actions"].append({"kind": kind, "device_id": device_id, "operation": "cleanup", "success": False})
+
+        state["recovery"]["verified"] = successes
+        state["final_status"] = "recovered" if successes else "recovery_cleanup_failed"
+        self._trace(state, f"RECOVERY: owned temporary resources cleanup verified={str(successes).lower()}")
+        await self._learn(state)
+        self._latest_cycle = state
+        return state

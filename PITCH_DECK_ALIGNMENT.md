@@ -1,21 +1,12 @@
-# HARIS pitch-deck alignment
+# HARIS Pitch-Deck Alignment
 
-| Claim | Status | Engineering position |
+| Pitch promise | Current implementation | Status |
 | --- | --- | --- |
-| Six retained network capabilities | IMPLEMENTED | Congestion, device status, location, geofencing, QoD, slicing. |
-| Seven APIs / identity APIs | REMOVE/OUTDATED | Identity and SIM workflows are intentionally excluded from network-resilience scope. |
-| Sandstorm degradation prediction | IMPLEMENTED | Transparent categorical 15-minute risk forecasting model; not trained ML. |
-| Memory improves the next storm | IMPLEMENTED | Similar verified corridor incidents are retrieved and cause a bounded, traced TRIAGE confidence adjustment. |
-| 5G/LTE fallback / bearer steering | ROADMAP | Installed NaC SDK exposes slices and QoD, not RAT/bearer selection. HARIS does not execute RAT switching. |
-| LangGraph orchestration | IMPLEMENTED | Runtime graph runs Sentinel, Cartographer, Triage, Warden, Actuator, Verify, Rollback, Learn. |
-| CrewAI | IMPLEMENTED (optional) | A bounded TRIAGE advisory Crew runs when configured; malformed/failing output falls back and cannot create actions or override WARDEN. |
-| Gemini / Groq | IMPLEMENTED (optional) | Advisory planner call is used when a configured key is present; deterministic fallback is traced and authoritative safety remains WARDEN. |
-| Continuous 60-second loop | IMPLEMENTED | Backend-owned, opt-in, non-overlapping scheduler; live writes require an extra flag. |
-| Supabase / Mem0 | PARTIAL | Adapters are real but require credentials; local append-only fallback is the tested path. |
-| Chroma | REMOVE/OUTDATED | Not used by this repository. |
-| Public repository/demo URL | ROADMAP | Deployment configuration is included; hosting remains an external step. |
-| Retry, timeout, fallback | PARTIAL | Nokia adapter has bounded retry and fixture fallback; dust feed has timeout/fallback. No circuit-breaker claim is made. |
-| Geofence callback | IMPLEMENTED | Validated receipt endpoint records only accepted event type; public hosting is an external dependency. |
-| Number Verification | SIMULATOR_VERIFIED | Nokia Fast OAuth, HARIS callback, and server-held verified identity receipt completed end-to-end. |
-| SIM Swap | SIMULATOR_VERIFIED | Nokia SIM Swap check completed end-to-end and returned a real boolean. |
-| Trusted Dispatch / WARDEN trust gate | SIMULATOR_VERIFIED | Server-held Number Verification plus Nokia SIM Swap correctly fail-closed with `BLOCK` on a recent SIM swap. |
+| Seven Nokia/CAMARA capability groups | Seven Nokia/CAMARA capability groups: Congestion Insights, Device Status / Reachability, Location Retrieval, Geofencing, Quality on Demand, Network Slicing, and Number Verification / SIM Swap. | COMPLETE |
+| Closed loop | Sentinel -> Cartographer -> Triage -> WARDEN -> Actuator -> Verify -> Rollback/Learn | COMPLETE |
+| Storm Shield, Capacity Harvest, Energy Guard, Trusted Dispatch | Deterministic playbooks; WARDEN gates all network actions | COMPLETE / FIXTURE-DEMO |
+| 60-second autonomy | Backend scheduler is opt-in, non-overlapping, default 60 seconds; live-write needs an additional explicit flag | COMPLETE |
+| Durable learning and audit | Backend-only Supabase durable history with a tamper-evident append-only SHA-256 audit chain; persistence across a Render backend restart has been verified. | COMPLETE |
+| QoD, Number Verification, SIM Swap, geofence callback | Verified against Nokia Simulator | COMPLETE |
+| Network Slicing attachment | Integration exists; sandbox slice never reached `OPERATING`, so attachment was not forced | PARTIAL / SANDBOX-LIMITED |
+| 5G/LTE and microwave/fibre control | Recommendation/operator-controller integration only | ROADMAP |

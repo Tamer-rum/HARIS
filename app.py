@@ -49,6 +49,32 @@ def safe_mapping(value: Any) -> Dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def authoritative_metric(value: Any, *, kind: str) -> str:
+    """Format a present authoritative value without turning absence into zero."""
+    if kind == "actions":
+        return str(len(value)) if isinstance(value, list) else "N/A"
+    if value is None:
+        return "N/A"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "N/A"
+    if not math.isfinite(number):
+        return "N/A"
+    if kind in {"confidence", "blast_radius"}:
+        return f"{number * 100:.0f}%"
+    if kind == "qod_cost":
+        return f"${number:.2f}"
+    return "N/A"
+
+
+def authoritative_verification_label(verification: Dict[str, Any]) -> str:
+    """Keep absent verification evidence distinct from an authoritative fail."""
+    if "verified" not in verification or verification.get("verified") is None:
+        return "N/A"
+    return "PASSED" if verification["verified"] is True else "REVIEW"
+
+
 def safe_upper(value: Any, fallback: str) -> str:
     """Format optional API strings without displaying a literal ``None``."""
     return str(value or fallback).upper()
@@ -1386,7 +1412,7 @@ def render_impact(
     result: Optional[Dict[str, Any]],
 ) -> None:
     st.markdown(
-        '<div class="section-title"><span class="section-mark">●</span><span>LIVE MITIGATION IMPACT</span></div>',
+        '<div class="section-title"><span class="section-mark">●</span><span>MITIGATION IMPACT</span></div>',
         unsafe_allow_html=True,
     )
 
@@ -1399,6 +1425,11 @@ def render_impact(
             </div>
             """
         )
+        return
+
+    final_status = str(result.get("final_status") or "").lower()
+    if final_status not in {"mitigated", "rolled_back_safely", "rollback_failed", "verification_failed", "degraded"}:
+        st.info("Impact is not evaluated until an authoritative cycle reaches verification.")
         return
 
     baseline = baseline_map(result)
@@ -1501,30 +1532,11 @@ def render_impact(
 
     a, b, c, d, e = st.columns(5)
 
-    a.metric(
-        "Confidence",
-        f"{float(plan.get('confidence', 0)) * 100:.0f}%",
-    )
-
-    b.metric(
-        "Blast Radius",
-        f"{float(plan.get('blast_radius', 0)) * 100:.0f}%",
-    )
-
-    c.metric(
-        "QoD Cost",
-        f"${float(plan.get('expected_cost_usd', 0)):.2f}",
-    )
-
-    d.metric(
-        "Actions",
-        str(len(plan.get("actions") or [])),
-    )
-
-    e.metric(
-        "Verification",
-        "PASSED" if verification.get("verified") else "REVIEW",
-    )
+    a.metric("Confidence", authoritative_metric(plan.get("confidence"), kind="confidence"))
+    b.metric("Blast Radius", authoritative_metric(plan.get("blast_radius"), kind="blast_radius"))
+    c.metric("QoD Cost", authoritative_metric(plan.get("expected_cost_usd"), kind="qod_cost"))
+    d.metric("Actions", authoritative_metric(plan.get("actions"), kind="actions"))
+    e.metric("Verification", authoritative_verification_label(verification))
 
     if execution.get("executed"):
         st.caption(

@@ -118,6 +118,10 @@ class PlaybookEngine:
             if c.congestion_level == "High"
         }
 
+        eligible_by_cell = {
+            cell_id: [d for d in devices if d.tier == 3 and d.cell_id == cell_id]
+            for cell_id in hot_cells
+        }
         return [
             Action(
                 "qos",
@@ -125,17 +129,24 @@ class PlaybookEngine:
                 {
                     "profile": "low-bandwidth",
                     "duration_seconds": 300,
+                    # This is an application-facing policy recommendation;
+                    # Nokia QoD cannot operate an upload queue.
+                    "defer_noncritical_uploads": True,
                 },
                 "Nokia reports High congestion; reduce Tier-3 bandwidth demand",
             )
             for d in devices
             if d.tier == 3 and d.cell_id in hot_cells
+            and len(eligible_by_cell.get(d.cell_id, [])) >= self.settings.capacity_harvest_min_bulk_devices
     ]
 
     def energy_guard(
         self,
         congestion: List[CongestionReading],
         devices: List[DeviceStatus],
+        congestion_history: Dict[str, List[Dict[str, Any]]] | None = None,
+        *,
+        observed_at: float | None = None,
     ) -> List[Action]:
 
         hot_cells = {
@@ -143,6 +154,29 @@ class PlaybookEngine:
             for c in congestion
             if c.congestion_level == "High"
         }
+
+        now = time.time() if observed_at is None else observed_at
+        history = congestion_history or {}
+
+        def sustained(cell_id: str) -> bool:
+            """Require a timestamped, unbroken High window; malformed data blocks."""
+            samples = history.get(cell_id, [])
+            if not isinstance(samples, list) or not samples:
+                return False
+            try:
+                high_times = sorted(float(item["observed_at"]) for item in samples if item.get("congestion_level") == "High")
+            except (KeyError, TypeError, ValueError):
+                return False
+            if not high_times or len(high_times) != len(samples):
+                return False
+            if high_times[-1] > now or high_times[-1] < now - self.settings.energy_guard_max_observation_gap_seconds:
+                return False
+            if high_times[0] > now - self.settings.energy_guard_sustained_congestion_seconds:
+                return False
+            return all(
+                later - earlier <= self.settings.energy_guard_max_observation_gap_seconds
+                for earlier, later in zip(high_times, high_times[1:])
+            )
 
         return [
             Action(
@@ -166,7 +200,8 @@ class PlaybookEngine:
             if (
                 d.tier == 3
                 and d.cell_id in hot_cells
-                and d.battery_pct < 25
+                and d.battery_pct < self.settings.energy_guard_battery_threshold_pct
+                and sustained(d.cell_id)
             )
         ]
 
@@ -177,6 +212,9 @@ class PlaybookEngine:
         dust_advisory: bool,
         congestion: List[CongestionReading],
         devices: List[DeviceStatus],
+        congestion_history: Dict[str, List[Dict[str, Any]]] | None = None,
+        *,
+        observed_at: float | None = None,
     ) -> Dict[str, Any]:
 
         # ---------------------------------------------------------
@@ -186,7 +224,7 @@ class PlaybookEngine:
         # ---------------------------------------------------------
 
         candidates = {
-            "energy_guard": self.energy_guard(congestion, devices),
+            "energy_guard": self.energy_guard(congestion, devices, congestion_history, observed_at=observed_at),
             "storm_shield": self.storm_shield(
                 dust_advisory,
                 congestion,

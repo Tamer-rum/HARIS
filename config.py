@@ -186,6 +186,12 @@ class AppSettings(BaseSettings):
     enable_continuous_loop: bool = False
     enable_live_write_loop: bool = False
     geofencing_monitoring_enabled: bool = True
+    # Energy Guard requires sustained evidence rather than one isolated High
+    # observation. Production history uses HARIS observation timestamps.
+    energy_guard_sustained_congestion_seconds: int = Field(default=600, ge=60, le=86400)
+    energy_guard_max_observation_gap_seconds: int = Field(default=120, ge=10, le=3600)
+    energy_guard_battery_threshold_pct: float = Field(default=25.0, ge=0, le=100)
+    capacity_harvest_min_bulk_devices: int = Field(default=2, ge=1, le=1000)
 
     nac_mode: str = "fixture"
     rollback_test_mode: bool = False

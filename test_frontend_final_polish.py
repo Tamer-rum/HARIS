@@ -1,4 +1,5 @@
 import asyncio
+import math
 import unittest
 from pathlib import Path
 
@@ -76,6 +77,33 @@ class FinalFrontendPolishTests(unittest.TestCase):
         self.assertIn("if settings.haris_backend_url:", controls)
         self.assertIn("result = payload[\"cycle\"]", controls)
         self.assertIn("get_system().run_cycle(", controls)
+
+    def test_10_impact_waits_for_authoritative_verification(self):
+        impact_start = self.source.index("def render_impact(")
+        impact = self.source[impact_start:self.source.index("def render_", impact_start + 4)]
+        self.assertIn("MITIGATION IMPACT", impact)
+        self.assertIn("Impact is not evaluated until an authoritative cycle reaches verification.", impact)
+        self.assertNotIn("LIVE MITIGATION IMPACT", impact)
+
+    def test_11_authoritative_metrics_distinguish_missing_from_zero(self):
+        self.assertEqual(app.authoritative_metric(None, kind="confidence"), "N/A")
+        self.assertEqual(app.authoritative_metric(0, kind="confidence"), "0%")
+        self.assertEqual(app.authoritative_metric(None, kind="blast_radius"), "N/A")
+        self.assertEqual(app.authoritative_metric(0, kind="blast_radius"), "0%")
+        self.assertEqual(app.authoritative_metric(None, kind="qod_cost"), "N/A")
+        self.assertEqual(app.authoritative_metric(0, kind="qod_cost"), "$0.00")
+        self.assertEqual(app.authoritative_metric(None, kind="actions"), "N/A")
+        self.assertEqual(app.authoritative_metric([], kind="actions"), "0")
+
+    def test_12_authoritative_fixture_metrics_and_live_unavailable_kpis_remain_truthful(self):
+        self.assertEqual(app.authoritative_metric(.86, kind="confidence"), "86%")
+        self.assertEqual(app.authoritative_metric(.12, kind="blast_radius"), "12%")
+        self.assertEqual(app.authoritative_metric(.75, kind="qod_cost"), "$0.75")
+        self.assertEqual(app.authoritative_metric([{"kind": "qos"}, {"kind": "slice_attach"}], kind="actions"), "2")
+        self.assertEqual(app.authoritative_verification_label({"verified": True}), "PASSED")
+        self.assertEqual(app.authoritative_verification_label({"verified": False}), "REVIEW")
+        self.assertEqual(app.authoritative_verification_label({}), "N/A")
+        self.assertTrue(math.isnan(app.optional_float(None)))
 
 
 if __name__ == "__main__":

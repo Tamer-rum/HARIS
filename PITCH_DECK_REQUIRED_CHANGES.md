@@ -1,11 +1,9 @@
-# Required pitch-deck updates
+# HARIS Current Implementation Alignment
 
-No editable deck source exists in this workspace. Apply these replacements to the presentation source:
+This repository implements the submitted GSMA MENA Ignite Hackathon 2026 storyboard; the submitted deck itself is not modified here.
 
-- Replace “seven APIs” with “six retained network capability groups.”
-- Mark catalog identity/account APIs as intentionally out of scope.
-- Replace trained-ML outage claims with “transparent short-horizon categorical risk forecasting.”
-- Replace live autonomous remediation claims with “full fixture remediation, live Nokia telemetry, and fail-closed live-write readiness.”
-- Mark 5G/LTE access steering and microwave/fibre path steering as roadmap/operator-controller integration.
-- Call the audit “append-only audit history,” not immutable.
-- Mark public deployment URL as pending hosting, not delivered.
+- Seven capability groups are represented: Congestion Insights, Device Status, Location Retrieval, Geofencing, Quality on Demand, Network Slicing, and Number Verification / SIM Swap.
+- Number Verification and SIM Swap are used only by WARDEN-owned Trusted Dispatch for privileged field intervention. Routine network remediation does not invoke identity checks.
+- The audit history is a tamper-evident append-only SHA-256 chain. It is not described as immutable or digitally signed storage.
+- 5G/LTE bearer switching and microwave/fibre steering remain operator-domain roadmap capabilities; this project does not claim to execute either.
+- Nokia simulator validation and sandbox limits are documented in `README.md`.
