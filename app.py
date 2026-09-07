@@ -71,16 +71,72 @@ def semantic_tone(value: Any) -> str:
     return "neutral"
 
 
-def operational_card(label: str, value: Any, detail: Any = None, tone: Optional[str] = None) -> str:
+def render_svg_icon(name: str, css_class: str = "console-icon") -> str:
+    """Return a small, non-data inline SVG from the shared console icon set."""
+    paths = {
+        "server": '<rect x="4" y="4" width="16" height="5" rx="1"/><rect x="4" y="11" width="16" height="5" rx="1"/><rect x="4" y="18" width="16" height="2" rx="1"/><path d="M7 6.5h.01M7 13.5h.01M17 6.5h1M17 13.5h1"/>',
+        "nokia": '<path d="M3 17V7l7 10V7l7 10V7l4 10"/><path d="M3 20h18"/>',
+        "shield": '<path d="M12 3 20 6v5c0 5-3.3 8.3-8 10-4.7-1.7-8-5-8-10V6l8-3Z"/><path d="M9 12l2 2 4-4"/>',
+        "radar": '<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r="1"/><path d="M12 2v2M22 12h-2M12 22v-2M2 12h2"/>',
+        "risk": '<path d="M4 19V14M9 19V10M14 19V6M19 19V3"/><path d="M3 21h18"/>',
+        "cycle": '<path d="M19 8a8 8 0 0 0-13.5-2L3 9"/><path d="M3 4v5h5"/><path d="M5 16a8 8 0 0 0 13.5 2L21 15"/><path d="M21 20v-5h-5"/>',
+        "congestion": '<rect x="4" y="8" width="16" height="11" rx="1"/><path d="M7 8V5M12 8V3M17 8V6M7 13h10M7 16h6"/>',
+        "device": '<rect x="7" y="3" width="10" height="18" rx="2"/><path d="M10 6h4M11.5 18h1"/>',
+        "location": '<path d="M12 21s7-5.2 7-11a7 7 0 1 0-14 0c0 5.8 7 11 7 11Z"/><circle cx="12" cy="10" r="2"/>',
+        "geofence": '<path d="M4 5l5-2 6 3 5-2v15l-5 2-6-3-5 2V5Z"/><path d="M9 3v15M15 6v15"/><circle cx="15" cy="10" r="2"/>',
+        "qod": '<path d="M4 7h16M4 12h16M4 17h16"/><circle cx="9" cy="7" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="7" cy="17" r="2"/>',
+        "slicing": '<path d="m12 3 8 4-8 4-8-4 8-4Z"/><path d="m4 12 8 4 8-4M4 17l8 4 8-4"/>',
+        "dispatch": '<circle cx="12" cy="7" r="3"/><circle cx="5" cy="10" r="2"/><circle cx="19" cy="10" r="2"/><path d="M7 20v-2a5 5 0 0 1 10 0v2M2 20v-2a4 4 0 0 1 3-3.9M22 20v-2a4 4 0 0 0-3-3.9"/>',
+    }
+    path = paths.get(name, paths["radar"])
+    return f'<svg class="{css_class}" viewBox="0 0 24 24" aria-hidden="true">{path}</svg>'
+
+
+def render_haris_wordmark() -> str:
+    """Project-owned geometric vector wordmark; no external logo asset."""
+    return """<svg class="haris-wordmark" viewBox="0 0 510 88" role="img" aria-label="HARIS">
+      <g fill="none" stroke="currentColor" stroke-width="7" stroke-linecap="square" stroke-linejoin="miter">
+        <path d="M10 12v64M10 44h66M76 12v64"/>
+        <path d="m102 76 31-64 31 64M114 51h38"/>
+        <path d="M190 76V12h38c17 0 25 8 25 20s-8 20-25 20h-38M224 52l34 24"/>
+        <path d="M290 12v64"/>
+        <path d="M370 16c-10-6-25-7-37-2-20 9-14 29 6 33l17 3c22 4 24 25 5 31-15 5-31 1-42-7"/>
+      </g>
+    </svg>"""
+
+
+def render_nokia_wordmark() -> str:
+    """Legible typographic Nokia treatment, confined to the integration card."""
+    return ('<svg class="nokia-wordmark" viewBox="0 0 150 42" role="img" aria-label="NOKIA">'
+            '<text x="1" y="31" fill="currentColor" font-family="Arial, sans-serif" font-size="30" font-weight="600" letter-spacing="1">NOKIA</text></svg>')
+
+
+def operational_card(label: str, value: Any, detail: Any = None, tone: Optional[str] = None, icon: str = "radar") -> str:
     """Reusable custom status panel for authoritative console state."""
     card_tone = tone or semantic_tone(value)
     symbol = {"success": "&#10003;", "warning": "&#9651;", "danger": "&#215;", "neutral": "&#9679;"}.get(card_tone, "&#9679;")
     detail_html = f'<div class="ops-card-detail">{safe_text(detail, "")}</div>' if detail else ""
+    card_visual = render_nokia_wordmark() if icon == "nokia" else render_svg_icon(icon, "ops-card-icon")
     return (
         f'<div class="ops-card {card_tone}">'
-        f'<div class="ops-card-label"><span class="ops-card-symbol">{symbol}</span>{safe_text(label)}</div>'
-        f'<div class="ops-card-value">{safe_text(value)}</div>{detail_html}</div>'
+        f'<div class="ops-card-content"><div class="ops-card-top"><div class="ops-card-label"><span class="ops-card-symbol">{symbol}</span>{safe_text(label)}</div>{card_visual}</div>'
+        f'<div class="ops-card-value">{safe_text(value)}</div>{detail_html}</div><div class="ops-card-motif" aria-hidden="true"></div></div>'
     )
+
+
+def capability_card(label: str, value: Any, detail: Any, icon: str) -> str:
+    """Shared capability card; status and description remain authoritative."""
+    tone = semantic_tone(value)
+    return (
+        f'<div class="capability-card {tone}">{render_svg_icon(icon, "capability-icon")}<div>'
+        f'<div class="capability-label">{safe_text(label)}</div><div class="capability-value">{safe_text(value)}</div>'
+        f'<div class="capability-detail">{safe_text(detail, "No capability detail available.")}</div></div></div>'
+    )
+
+
+def render_section_header(title: str, subtitle: Optional[str] = None) -> None:
+    subtitle_html = f'<div class="section-subtitle">{safe_text(subtitle)}</div>' if subtitle else ""
+    render_html(f'<div class="console-section-header"><div class="console-section-title">{safe_text(title)}</div><div class="console-section-rule"></div>{subtitle_html}</div>')
 
 
 def authoritative_haris_state(result: Optional[Dict[str, Any]], supervisory: Optional[Dict[str, Any]] = None) -> str:
@@ -137,8 +193,6 @@ st.set_page_config(
 st.markdown(
     """
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap');
-
 :root {
     --bg: #060a10;
     --panel: #0b121c;
@@ -509,6 +563,116 @@ div[role="radiogroup"] label:has(input:checked) { color:#eafcff !important; box-
 div[data-testid="stAlert"] {
     border-radius: 10px;
 }
+
+/* Reference command-center reconstruction: a full-width, non-data visual shell. */
+:root { --ink:#020810; --navy:#04111d; --panel-ink:rgba(5,18,31,.84); --cyan:#32d9ff; --cyan-soft:#60e7ff; --green:#43e6ad; --amber:#ffc84a; --red:#ff4d5a; --muted:#91a7bb; --primary:#f4f8fc; }
+.stApp { min-height:100vh; background:radial-gradient(ellipse at 86% 2%,rgba(22,95,174,.24),transparent 28%),radial-gradient(ellipse at 12% -8%,rgba(25,81,145,.17),transparent 30%),linear-gradient(140deg,#020810 0%,#04111d 46%,#020810 100%) !important; }
+.block-container { max-width:none !important; width:100% !important; padding:1.35rem 1.35rem 1.2rem !important; }
+.stApp::before { opacity:.13; background-size:94px 94px; }
+.haris-decor { position:fixed; inset:0; z-index:-1; overflow:hidden; pointer-events:none; }
+.haris-globe { position:absolute; right:-10vw; top:-15vh; width:min(64vw,920px); height:min(64vw,920px); opacity:.64; filter:drop-shadow(0 0 34px rgba(46,145,255,.24)); }
+.haris-topology-lines { position:absolute; left:-4vw; top:0; width:40vw; height:34vh; opacity:.4; }.haris-floor-grid { position:absolute; left:-4vw; right:-4vw; bottom:-8vh; height:31vh; opacity:.27; }
+.command-header { display:grid; grid-template-columns:minmax(260px,1.15fr) minmax(290px,1.25fr) minmax(520px,2.1fr); align-items:center; gap:26px; margin:0; padding:18px 6px 23px; border:0; border-radius:0; background:transparent; box-shadow:none; overflow:visible; }
+.command-header::after { left:0; right:0; bottom:0; background:linear-gradient(90deg,rgba(50,217,255,.15),rgba(96,231,255,.88) 18%,rgba(50,217,255,.18) 63%,transparent); }
+.command-kicker { color:#99c7ee; font-size:.78rem; letter-spacing:.17em; line-height:1.75; }.command-brand { margin:0; gap:0; border-right:1px solid rgba(130,207,255,.78); padding-right:25px; min-height:84px; align-items:center; }.command-mark { display:none; }.command-name { color:#f5fbff; font-size:3.15rem; letter-spacing:.24em; line-height:1; text-shadow:0 0 14px rgba(142,211,255,.68),0 0 28px rgba(64,149,255,.32); }.command-subtitle { max-width:290px; color:#c3dcf4; font-size:.54rem; letter-spacing:.16em; line-height:1.65; text-transform:uppercase; }.command-message { color:#a7c9ef; font-size:.89rem; font-weight:700; letter-spacing:.18em; line-height:1.75; text-transform:uppercase; }.command-states { align-self:center; grid-template-columns:repeat(5,minmax(82px,1fr)); border-left:0; }.command-state { min-height:51px; padding:3px 10px 3px 15px; border-right:0; border-left:1px solid rgba(131,199,242,.37); }.command-state-label { color:#9db5cb; font-size:.49rem; letter-spacing:.08em; }.command-state-value { display:flex; align-items:center; gap:6px; margin-top:8px; color:#d9efff; font-size:.61rem; white-space:nowrap; }.command-state-value::before { content:""; width:8px; height:8px; flex:0 0 8px; border-radius:50%; background:#65dff8; box-shadow:0 0 11px rgba(96,231,255,.72); }.command-state.success .command-state-value { color:#7cf2bd; }.command-state.success .command-state-value::before { background:#43e6ad; box-shadow:0 0 11px rgba(67,230,173,.74); }.command-state.warning .command-state-value { color:#ffd66c; }.command-state.warning .command-state-value::before { background:#ffc84a; box-shadow:0 0 11px rgba(255,200,74,.74); }.command-state.danger .command-state-value { color:#ff7882; }.command-state.danger .command-state-value::before { background:#ff4d5a; box-shadow:0 0 11px rgba(255,77,90,.7); }
+div[role="radiogroup"] { display:grid !important; grid-template-columns:repeat(5,minmax(0,1fr)); width:100%; gap:0; border-bottom:1px solid rgba(64,179,239,.38); padding:0 0 .02rem; margin:0; }
+div[role="radiogroup"] label { display:flex !important; justify-content:center; align-items:center; min-height:49px; padding:.55rem .35rem !important; color:#9bb7cf !important; font-size:.67rem !important; letter-spacing:.12em; text-align:center; position:relative; }
+div[role="radiogroup"] label::after { content:""; position:absolute; left:50%; bottom:-1px; width:0; height:2px; background:#60e7ff; box-shadow:0 0 11px rgba(96,231,255,.9),0 0 20px rgba(50,217,255,.52); transition:width 190ms ease,left 190ms ease; }.command-header + div[role="radiogroup"] { margin-top:0; }
+div[role="radiogroup"] label:hover::after { width:52%; left:24%; } div[role="radiogroup"] label:has(input:checked)::after { width:58%; left:21%; } div[role="radiogroup"] label:has(input:checked) { color:#f2fbff !important; text-shadow:0 0 13px rgba(96,231,255,.72); }
+.overview-banner { padding:27px 5px 20px; align-items:flex-start; }.overview-banner-title,.console-section-title { color:#7ee7ff; font-size:1.15rem; letter-spacing:.20em; text-transform:uppercase; text-shadow:0 0 12px rgba(50,217,255,.24); }.overview-banner-title::after { content:""; display:block; width:35px; height:2px; margin-top:13px; background:#70e7ff; box-shadow:0 0 10px rgba(96,231,255,.7); }.overview-banner-detail { max-width:none; text-align:left; color:#9bb5cb; font-size:.55rem; letter-spacing:.14em; text-transform:uppercase; }.ops-card { min-height:168px; padding:17px; border-radius:12px; background:linear-gradient(135deg,rgba(7,23,39,.88),rgba(4,14,25,.84)); border-color:rgba(96,184,244,.45); box-shadow:inset 0 1px 0 rgba(223,251,255,.05),0 9px 22px rgba(0,0,0,.24); }.ops-card-top { display:flex; justify-content:space-between; gap:8px; align-items:flex-start; }.ops-card-label { color:#a2bed7; font-size:.57rem; letter-spacing:.12em; }.ops-card-value { margin-top:27px; color:#f2f8fc; font-size:1.2rem; }.ops-card-detail { margin-top:9px; color:#94b8cc; font-size:.67rem; }.ops-card-icon { width:48px; height:48px; color:#71dfff; opacity:.76; fill:none; stroke:currentColor; stroke-width:1.45; stroke-linecap:round; stroke-linejoin:round; }.ops-card-motif { position:absolute; left:17px; bottom:16px; width:58%; height:11px; opacity:.46; background:linear-gradient(135deg,transparent 0 9%,currentColor 10% 12%,transparent 13% 25%,currentColor 26% 28%,transparent 29% 42%,currentColor 43% 45%,transparent 46% 61%,currentColor 62% 64%,transparent 65%); mask-image:linear-gradient(90deg,black,transparent); }.ops-card.success { border-color:rgba(67,230,173,.76); color:#66ecb4; }.ops-card.warning { border-color:rgba(255,200,74,.76); color:#ffd263; }.ops-card.danger { border-color:rgba(255,77,90,.78); color:#ff7781; }.ops-card.neutral { border-color:rgba(96,198,255,.68); color:#7edfff; }.ops-card:hover { transform:translateZ(18px) scale(1.008); box-shadow:0 29px 46px rgba(0,0,0,.52),0 15px 34px color-mix(in srgb,currentColor 25%,transparent),inset 0 1px 0 rgba(255,255,255,.1); }
+.console-section-header { margin:28px 5px 16px; }.console-section-rule { width:34px; height:2px; margin-top:13px; background:#62e5ff; box-shadow:0 0 10px rgba(96,231,255,.7); }.section-subtitle { margin:9px 0 0 56px; color:#9eb9cf; font-size:.51rem; font-weight:800; letter-spacing:.16em; text-transform:uppercase; }.section-title { color:#7ee7ff; letter-spacing:.15em; margin:26px 5px 13px; }.section-title span { color:inherit; }
+.notice { min-height:86px; margin:0; padding:17px 19px; border-left:0; border-color:rgba(96,198,255,.4); background:linear-gradient(120deg,rgba(6,25,43,.92),rgba(5,14,24,.78)); }.notice::before { content:""; display:inline-block; width:9px; height:9px; margin-right:11px; border-radius:50%; background:#60e7ff; box-shadow:0 0 10px rgba(96,231,255,.65); }.notice b { color:#b9d8ef; }.notice.warning::before { background:#ffc84a; }.notice.danger::before { background:#ff4d5a; }.notice.success::before { background:#43e6ad; }
+.cycle-panel { min-height:86px; display:flex; align-items:center; gap:15px; padding:16px 18px; border:1px solid rgba(96,198,255,.4); border-radius:10px; background:linear-gradient(120deg,rgba(6,25,43,.92),rgba(5,14,24,.78)); }.cycle-icon { width:46px; height:46px; flex:0 0 46px; color:#7ee7ff; fill:none; stroke:currentColor; stroke-width:1.3; stroke-linecap:round; stroke-linejoin:round; }.cycle-panel-label { color:#a2bed7; font-size:.57rem; font-weight:800; letter-spacing:.12em; }.cycle-panel-value { margin-top:8px; color:#edf8ff; font-size:.73rem; }.cycle-panel-value b { color:#ffd263; }
+.capability-card { min-height:107px; display:flex; align-items:center; gap:18px; padding:15px 17px; border:1px solid rgba(67,230,173,.52); border-radius:11px; background:linear-gradient(135deg,rgba(7,23,39,.85),rgba(4,14,25,.78)); transform-style:preserve-3d; transition:transform 210ms cubic-bezier(.18,.72,.2,1),box-shadow 210ms ease,border-color 210ms ease; }.capability-card:hover { transform:translateZ(15px) scale(1.006); box-shadow:0 22px 37px rgba(0,0,0,.48),0 11px 30px rgba(67,230,173,.14); }.capability-card.warning { border-color:rgba(255,200,74,.65); }.capability-card.danger { border-color:rgba(255,77,90,.7); }.capability-card.neutral { border-color:rgba(96,198,255,.56); }.capability-icon { width:42px; height:42px; flex:0 0 42px; color:#82dfff; fill:none; stroke:currentColor; stroke-width:1.35; stroke-linecap:round; stroke-linejoin:round; }.capability-label { color:#aac4db; font-size:.56rem; font-weight:800; letter-spacing:.12em; }.capability-value { margin-top:10px; color:#70efb6; font-size:.9rem; font-weight:800; }.capability-card.warning .capability-value { color:#ffd263; }.capability-card.danger .capability-value { color:#ff7681; }.capability-detail { margin-top:7px; color:#89a9c0; font-size:.64rem; }
+.haris-wordmark { display:block; width:min(100%, 430px); height:auto; color:#effaff; filter:drop-shadow(0 0 5px rgba(169,226,255,.82)) drop-shadow(0 0 14px rgba(63,147,255,.33)); }.nokia-wordmark { width:96px; height:31px; color:#80d8ff; opacity:.93; filter:drop-shadow(0 0 7px rgba(70,179,255,.45)); }
+/* Streamlit 1.62.0 Radio.DIWLksx4.js renders:
+   label[data-testid=stRadioOption] > div > div > div:first-child as the
+   visible circular indicator. The preceding input lives in a hidden span. */
+[data-testid="stRadio"] { display:block !important; width:min(96vw, 1920px) !important; max-width:none !important; margin:0 auto !important; }
+[data-testid="stRadio"] div[role="radiogroup"] { width:100% !important; max-width:none !important; margin:0 auto !important; }
+[data-testid="stRadioOption"] > div > div { gap:0 !important; }
+[data-testid="stRadioOption"] > div > div > div:first-child { display:none !important; }
+[data-testid="stRadioOption"] { gap:0 !important; justify-content:center !important; transition:color 190ms ease,text-shadow 190ms ease; }
+[data-testid="stRadioOption"] > div > div > :last-child,
+[data-testid="stRadioOption"] > div > div > :last-child * { color:#86bce8 !important; font-size:14px !important; letter-spacing:.09em !important; transition:color 190ms ease,text-shadow 190ms ease; }
+[data-testid="stRadioOption"]:hover > div > div > :last-child,
+[data-testid="stRadioOption"]:hover > div > div > :last-child * { color:#b8e9ff !important; text-shadow:0 0 8px rgba(50,217,255,.55),0 0 18px rgba(50,217,255,.20); }
+[data-testid="stRadioOption"]:has(input:checked) > div > div > :last-child,
+[data-testid="stRadioOption"]:has(input:checked) > div > div > :last-child * { color:#d7f5ff !important; text-shadow:0 0 8px rgba(50,217,255,.70),0 0 19px rgba(50,217,255,.30); }
+[data-testid="stRadio"] label::after { height:2px; background:#60e7ff; box-shadow:0 0 5px rgba(96,231,255,.95),0 0 13px rgba(50,217,255,.72); }
+[data-testid="stRadio"] label:has(input:checked)::before { content:""; position:absolute; z-index:-1; left:18%; right:18%; bottom:0; height:27px; pointer-events:none; background:linear-gradient(to top,rgba(50,217,255,.20),rgba(50,217,255,.055) 48%,transparent 100%); filter:blur(7px); }
+.capability-card { margin:0 0 12px; }
+
+/* Keep all readable content on a stable 2D layer. Only pseudo-elements carry
+   the depth illusion so browser compositing cannot rasterize card typography. */
+.ops-card, .capability-card { position:relative; isolation:isolate; transform:none !important; transform-style:flat !important; will-change:box-shadow,border-color !important; filter:none !important; }
+.ops-card:hover, .capability-card:hover { transform:none !important; box-shadow:0 22px 38px rgba(0,0,0,.46),0 13px 29px rgba(50,217,255,.16),inset 0 1px 0 rgba(255,255,255,.08); }
+.ops-card::before, .capability-card::before { content:""; position:absolute; z-index:-1; pointer-events:none; left:9px; right:9px; bottom:-12px; height:30px; border-radius:inherit; opacity:.22; transform:translateY(2px) scale(.96); transition:transform 200ms ease,opacity 200ms ease,filter 200ms ease; filter:blur(13px); background:currentColor; }
+.ops-card:hover::before, .capability-card:hover::before { opacity:.55; transform:translateY(8px) scale(1.015); filter:blur(17px); }
+.ops-card > *, .capability-card > * { position:relative; z-index:1; transform:none !important; filter:none !important; opacity:1; }
+.ops-card-label, .capability-label { font-size:11px; letter-spacing:.08em; }.ops-card-detail, .capability-detail { font-size:12px; letter-spacing:0; }.ops-card-value { font-size:20px; }.capability-value { font-size:15px; }
+.workflow-panel,.panel,.kpi-card,.trace { border-color:rgba(96,198,255,.36); background:linear-gradient(135deg,rgba(7,23,39,.86),rgba(4,14,25,.78)); }.workflow-row { min-height:57px; }.dispatch-attempt { background:linear-gradient(135deg,rgba(7,23,39,.9),rgba(4,14,25,.8)); }
+/* Stable, crisp content layer for device/list/status panels. Pseudo-elements
+   carry their rear glow, never the text-bearing shell. */
+.panel,.kpi-card,.row,.badge,.small-note,.capability-card,.ops-card { transform:none !important; transform-style:flat !important; filter:none !important; opacity:1 !important; will-change:box-shadow,border-color !important; }
+.panel:hover,.kpi-card:hover,.row:hover,.badge:hover { transform:none !important; filter:none !important; border-color:rgba(96,231,255,.56); box-shadow:0 14px 28px rgba(0,0,0,.32),0 8px 22px rgba(50,217,255,.12); }
+.panel > *,.kpi-card > *,.row > *,.badge > *,.small-note > * { transform:none !important; filter:none !important; opacity:1 !important; }
+
+/* The policy toggle is a glass control, not an alarm. Streamlit renders it as
+   stCheckbox with an accessible checkbox role. */
+[data-testid="stCheckbox"] [role="checkbox"] { background:rgba(50,62,74,.45) !important; border:1px solid rgba(120,145,165,.35) !important; box-shadow:inset 0 1px 0 rgba(255,255,255,.06) !important; }
+[data-testid="stCheckbox"] [role="checkbox"] > * { background:#8192a0 !important; box-shadow:0 1px 3px rgba(0,0,0,.38) !important; }
+[data-testid="stCheckbox"] [role="checkbox"][aria-checked="true"] { background:rgba(12,85,125,.45) !important; border-color:#32d9ff !important; box-shadow:inset 0 1px 0 rgba(218,249,255,.14),0 0 10px rgba(50,217,255,.25) !important; }
+[data-testid="stCheckbox"] [role="checkbox"][aria-checked="true"] > * { background:#b9f3ff !important; box-shadow:0 0 8px rgba(96,231,255,.55) !important; }
+
+/* Primary autonomous command: restrained navy/cyan, with a rear-only depth
+   illusion so the label remains vector-crisp. */
+div[data-testid="stButton"] button[kind="primary"] { position:relative; isolation:isolate; overflow:visible; transform:none !important; filter:none !important; color:#d7f5ff !important; border:1px solid rgba(50,217,255,.55) !important; background:linear-gradient(180deg,rgba(11,38,58,.82),rgba(5,20,32,.88)) !important; box-shadow:inset 0 1px 0 rgba(203,246,255,.08),0 0 12px rgba(50,217,255,.10) !important; text-shadow:none !important; }
+div[data-testid="stButton"] button[kind="primary"]::before { content:""; position:absolute; z-index:-1; pointer-events:none; left:10px; right:10px; bottom:-10px; height:24px; border-radius:inherit; background:rgba(50,217,255,.48); opacity:.18; filter:blur(13px); transition:opacity 190ms ease,filter 190ms ease; }
+div[data-testid="stButton"] button[kind="primary"]:hover { transform:none !important; filter:none !important; border-color:#60e7ff !important; background:linear-gradient(180deg,rgba(13,49,73,.88),rgba(5,22,35,.94)) !important; box-shadow:inset 0 1px 0 rgba(220,250,255,.14),0 0 18px rgba(50,217,255,.24),0 10px 28px rgba(0,0,0,.30) !important; }
+div[data-testid="stButton"] button[kind="primary"]:hover::before { opacity:.52; filter:blur(16px); }
+div[data-testid="stButton"] button[kind="primary"]:active { border-color:#a4f0ff !important; box-shadow:inset 0 0 14px rgba(50,217,255,.16),0 0 14px rgba(50,217,255,.24) !important; }
+
+/* Cyan is the healthy audit state; red remains reserved for tampering and
+   amber for legacy records that cannot be chain-verified. */
+.audit-chain-card { border-color:#20c7f5; background:linear-gradient(100deg,rgba(5,36,52,.72),rgba(7,15,23,.90)); box-shadow:0 0 14px rgba(32,199,245,.18); }
+.audit-chain-symbol { color:#60e7ff; }
+.audit-chain-card.invalid { border-color:rgba(255,77,95,.62); background:linear-gradient(100deg,rgba(55,17,26,.65),rgba(7,15,23,.90)); box-shadow:none; }.audit-chain-card.invalid .audit-chain-symbol { color:#ff6e7c; }
+.audit-chain-card.legacy { border-color:rgba(255,200,74,.58); background:linear-gradient(100deg,rgba(61,45,17,.58),rgba(7,15,23,.90)); box-shadow:none; }.audit-chain-card.legacy .audit-chain-symbol { color:#ffd263; }
+
+/* Five-card operational row: all cards reserve identical content regions. */
+.ops-card { height:180px; min-height:180px; box-sizing:border-box; display:flex; padding:17px !important; overflow:hidden; }
+.ops-card-content { position:relative; z-index:2; display:flex; flex:1 1 auto; min-width:0; flex-direction:column; }
+.ops-card-top { min-height:48px; align-items:flex-start; }
+.ops-card-label { min-height:18px; line-height:18px; }
+.ops-card-value { min-height:29px; margin-top:13px !important; line-height:29px; }
+.ops-card-detail { position:relative; z-index:2; min-height:34px; max-height:34px; margin-top:auto !important; overflow:hidden; line-height:17px; }
+.ops-card-motif { z-index:0; pointer-events:none; bottom:9px !important; opacity:.22 !important; }
+.ops-card::before { z-index:0; pointer-events:none; }
+
+/* Capability cards retain only a crisp semantic border halo; no under-card
+   haze, white inner shadow, transform, or text-bearing blur. */
+.capability-card { box-shadow:none !important; background:linear-gradient(135deg,rgba(7,23,39,.96),rgba(4,14,25,.94)) !important; }
+.capability-card::before { content:none !important; display:none !important; }
+.capability-card:hover { transform:none !important; filter:none !important; border-color:color-mix(in srgb,currentColor 76%,#60e7ff) !important; box-shadow:0 0 10px color-mix(in srgb,currentColor 18%,transparent) !important; }
+.capability-card > * { position:relative; z-index:2; transform:none !important; filter:none !important; }
+
+/* Streamlit toggle variants all inherit the same no-red command-center skin. */
+[data-testid="stCheckbox"] [role="checkbox"],
+[data-testid="stCheckbox"] [role="switch"],
+[data-testid="stCheckbox"] button[aria-checked] { background:rgba(65,75,85,.45) !important; border:1px solid rgba(140,160,175,.30) !important; box-shadow:inset 0 1px 0 rgba(255,255,255,.05) !important; }
+[data-testid="stCheckbox"] [role="checkbox"] > *,
+[data-testid="stCheckbox"] [role="switch"] > *,
+[data-testid="stCheckbox"] button[aria-checked] > * { background:#a8b6c2 !important; box-shadow:0 1px 3px rgba(0,0,0,.35) !important; }
+[data-testid="stCheckbox"] [role="checkbox"][aria-checked="true"],
+[data-testid="stCheckbox"] [role="switch"][aria-checked="true"],
+[data-testid="stCheckbox"] button[aria-checked="true"] { background:rgba(10,75,110,.48) !important; border-color:rgba(50,217,255,.65) !important; box-shadow:0 0 10px rgba(50,217,255,.20),inset 0 1px 0 rgba(218,249,255,.12) !important; }
+[data-testid="stCheckbox"] [role="checkbox"][aria-checked="true"] > *,
+[data-testid="stCheckbox"] [role="switch"][aria-checked="true"] > *,
+[data-testid="stCheckbox"] button[aria-checked="true"] > * { background:#b8f1ff !important; }
+.footer { display:flex; justify-content:space-between; margin:38px -1.35rem -1.2rem; padding:24px 1.35rem; border-top:1px solid rgba(96,198,255,.35); color:#91b0cc; font-size:.54rem; letter-spacing:.18em; text-transform:uppercase; }
+@media (max-width:1250px) { .command-header { grid-template-columns:1fr 1fr; }.command-states { grid-column:1/-1; }.command-message { padding-left:18px; }.ops-card { min-height:150px; }.command-name { font-size:2.65rem; } }
+@media (max-width:850px) { .block-container { padding:.7rem !important; }.command-header { grid-template-columns:1fr; gap:13px; padding:14px 3px 18px; }.command-brand { border-right:0; padding-right:0; }.command-message { padding-left:0; }.command-states { grid-template-columns:repeat(2,1fr); }.command-state { border-bottom:1px solid rgba(131,199,242,.19); }.command-name { font-size:2.35rem; letter-spacing:.17em; } div[role="radiogroup"] { grid-template-columns:repeat(2,1fr); } div[role="radiogroup"] label { min-height:42px; font-size:.57rem !important; } .ops-card { min-height:134px; }.footer { margin-left:-.7rem; margin-right:-.7rem; padding-left:.7rem; padding-right:.7rem; gap:16px; flex-wrap:wrap; }.haris-globe { width:110vw; height:110vw; right:-43vw; top:-5vh; opacity:.36; } }
 </style>
 """,
     unsafe_allow_html=True,
@@ -700,7 +864,7 @@ def render_header(result: Optional[Dict[str, Any]], supervisory: Optional[Dict[s
         f"""
         <div class="overview-banner">
             <div>
-                <div class="command-kicker">AUTONOMOUS NETWORK RESILIENCE</div>
+                <div class="command-kicker">CURRENT STATE · SECURE OPERATIONS · NETWORK RESILIENCE</div>
                 <div class="overview-banner-title">Operational overview</div>
             </div>
             <div class="overview-banner-detail">{safe_text(detail)} Current cycle state: <b class="{css}">{safe_text(text)}</b></div>
@@ -742,13 +906,17 @@ def render_capability_matrix(result: Optional[Dict[str, Any]]) -> None:
         "SDK_UNSUPPORTED": "UNAVAILABLE",
         "PRIVILEGED_ONLY": "PRIVILEGED ONLY",
     }
-    st.markdown('<div class="section-title"><span class="section-mark">●</span><span>LIVE CAPABILITY MATRIX</span></div>', unsafe_allow_html=True)
+    render_section_header("NETWORK CAPABILITY MATRIX", "Network capabilities · Nokia NaC · service readiness")
     columns = st.columns(3)
+    icons = {
+        "congestion_insights": "congestion", "device_status": "device", "location": "location",
+        "geofencing": "geofence", "qod": "qod", "slicing": "slicing", "trusted_dispatch": "dispatch",
+    }
     for index, (key, label) in enumerate(labels):
         item = report.get(key, {"status": "PRIVILEGED_ONLY", "reason": "Number Verification + SIM Swap; privileged field intervention only."})
         status = display.get(item.get("status"), str(item.get("status", "UNKNOWN")).replace("_", " "))
         with columns[index % 3]:
-            render_html(operational_card(label, status, item.get("reason")))
+            render_html(capability_card(label, status, item.get("reason"), icons[key]))
 
 
 def render_environment(result: Optional[Dict[str, Any]]) -> None:
@@ -1626,10 +1794,7 @@ def render_trace(trace: List[str]) -> None:
 # ============================================================================
 
 def render_controls() -> None:
-    st.markdown(
-        '<div class="section-title"><span class="section-mark">●</span><span>OPERATIONS CONTROL</span></div>',
-        unsafe_allow_html=True,
-    )
+    render_section_header("AUTONOMOUS OPERATIONS", "Sense · predict · reason · plan · WARDEN · act · verify · learn")
 
     a, b, d = st.columns([1.35, 1.35, 2.0])
 
@@ -1717,22 +1882,46 @@ def render_controls() -> None:
         )
 
 
+def history_storage_status(memory: Any) -> Dict[str, Any]:
+    """Normalize the explicit memory-store storage contract for the UI.
+
+    Legacy/test stores predate persistence metadata; they are truthfully treated
+    as available process-local memory instead of crashing History & Audit.
+    """
+    fallback = {"backend": "memory", "durable": False, "available": True, "status": "PROCESS_LOCAL"}
+    status = getattr(memory, "persistence_status", fallback)
+    status = status() if callable(status) else status
+    return status if isinstance(status, dict) else fallback
+
+
 def render_history(supervisory: Optional[Dict[str, Any]] = None) -> None:
-    st.markdown('<div class="section-title"><span class="section-mark">●</span><span>INCIDENT HISTORY / REPLAY</span></div>', unsafe_allow_html=True)
+    render_section_header("HISTORY & AUDIT", "Incident replay · trusted dispatch history · tamper-evident evidence")
     backend_audit = (supervisory or {}).get("audit") if settings.haris_backend_url else None
     if backend_audit is not None:
         records = backend_audit.get("records", [])
         chain = backend_audit.get("chain", {})
+        persistence = backend_audit.get("persistence") or chain.get("persistence") or {}
     else:
-        records = get_system().memory.recent_incidents()
-        chain = get_system().memory.verify_audit_chain()
+        memory = get_system().memory
+        records = memory.recent_incidents()
+        chain = memory.verify_audit_chain()
+        persistence = history_storage_status(memory)
     audit_valid = bool(chain.get("valid"))
+    legacy_chain = not audit_valid and str(chain.get("reason") or "").startswith("legacy_")
+    audit_state = "VALID" if audit_valid else ("LEGACY" if legacy_chain else "INVALID")
+    audit_class = "" if audit_valid else (" legacy" if legacy_chain else " invalid")
     render_html(
-        f'<div class="audit-chain-card{"" if audit_valid else " invalid"}">'
-        f'<div class="audit-chain-symbol">{"&#10003;" if audit_valid else "&#215;"}</div>'
+        f'<div class="audit-chain-card{audit_class}">'
+        f'<div class="audit-chain-symbol">{"&#10003;" if audit_valid else ("&#9888;" if legacy_chain else "&#215;")}</div>'
         f'<div><div class="audit-chain-title">TAMPER-EVIDENT AUDIT CHAIN</div>'
-        f'<div class="audit-chain-value">AUDIT CHAIN: {"VALID" if audit_valid else "LEGACY/INVALID"}</div></div></div>'
+        f'<div class="audit-chain-value">AUDIT CHAIN: {audit_state}</div></div></div>'
     )
+    if not persistence.get("available", True):
+        st.warning("Durable audit persistence is unavailable; this cycle remains safety-controlled but was not confirmed as durably saved.")
+    elif persistence.get("durable"):
+        st.caption("History storage: durable append-only backend repository.")
+    else:
+        st.caption("History storage: process-local memory (configure Supabase for restart-safe deployment history).")
     if not records:
         st.caption("No append-only audit history is available yet.")
         return
@@ -1790,10 +1979,8 @@ def render_status_bar(result: Optional[Dict[str, Any]], supervisory: Optional[Di
     render_html(
         f"""
         <div class="command-header">
-            <div>
-                <div class="command-kicker">AI-POWERED NETWORK RESILIENCE</div>
-                <div class="command-brand"><div class="command-mark">H</div><div><div class="command-name">HARIS</div><div class="command-subtitle">Hybrid Agent for Resilient Infrastructure and Service-continuity</div></div></div>
-            </div>
+            <div class="command-brand"><div>{render_haris_wordmark()}<div class="command-subtitle">Hybrid Agent for Resilient Infrastructure<br>and Service-continuity</div></div></div>
+            <div class="command-message">AI-powered network resilience<br>for a more connected tomorrow</div>
             <div class="command-states">{state_html}</div>
         </div>
         """
@@ -1810,27 +1997,39 @@ def render_overview(result: Optional[Dict[str, Any]], supervisory: Optional[Dict
     dispatch = safe_mapping(cycle.get("trusted_dispatch"))
     warden_value = "PENDING" if dispatch.get("status") == "WAITING_FOR_IDENTITY_VERIFICATION" else "APPROVED" if warden.get("verified") else "REVIEW"
     cards = [
-        ("Backend Health", backend_value, "Authoritative backend supervision" if settings.haris_backend_url else "Local fixture console"),
-        ("Nokia Integration", safe_upper(get_system().client.name, "UNAVAILABLE"), presentation_mode_label()),
-        ("WARDEN", warden_value, dispatch.get("reason") or "Safety authority state"),
-        ("Active Incident", incident.get("incident_id") or "NONE", ", ".join(incident.get("affected_cells") or []) or "No active incident"),
-        ("Predicted Risk", safe_upper(prediction.get("predicted_risk_level"), "MONITORING"), "Authoritative forecast state" if prediction else "No active forecast"),
+        ("Backend Health", backend_value, "Authoritative backend supervision" if settings.haris_backend_url else "Local fixture console", "server"),
+        ("Nokia Integration", safe_upper(get_system().client.name, "UNAVAILABLE"), presentation_mode_label(), "nokia"),
+        ("WARDEN", warden_value, dispatch.get("reason") or "Safety authority state", "shield"),
+        ("Active Incident", incident.get("incident_id") or "NONE", ", ".join(incident.get("affected_cells") or []) or "No active incident", "radar"),
+        ("Predicted Risk", safe_upper(prediction.get("predicted_risk_level"), "MONITORING"), "Authoritative forecast state" if prediction else "No active forecast", "risk"),
     ]
-    for column, (label, value, detail) in zip(cols, cards):
+    for column, (label, value, detail, icon) in zip(cols, cards):
         with column:
-            render_html(operational_card(label, value, detail))
-    st.markdown('<div class="section-title"><span class="section-mark">●</span><span>OPERATIONAL NOTIFICATIONS</span></div>', unsafe_allow_html=True)
+            render_html(operational_card(label, value, detail, icon=icon))
+    render_section_header("OPERATIONAL NOTIFICATIONS")
     notices = overview_notifications(cycle, supervisory)
-    if notices:
-        for tone, title, message in notices:
-            render_html(f'<div class="notice {tone}"><b>{title}</b><br>{message}</div>')
-    else:
-        st.caption("No authoritative security or incident notification is active.")
+    left, right = st.columns([1, 1])
+    with left:
+        notification_html = "".join(
+            f'<div class="notice {tone}"><b>{safe_text(title)}</b><br>{safe_text(message)}</div>'
+            for tone, title, message in notices
+        ) or '<div class="notice"><b>OPERATIONAL NOTIFICATIONS</b><br>No authoritative security or incident notification is active.</div>'
+        render_html(notification_html)
+    with right:
+        current_state = authoritative_haris_state(cycle, supervisory)
+        cycle_detail = safe_mapping(cycle).get("explanation") or (
+            "Privileged authorization is pending." if current_state == "WAITING_FOR_IDENTITY_VERIFICATION"
+            else "No completed cycle is available." if not cycle else "Current HARIS cycle state is authoritative."
+        )
+        render_html(
+            f'<div class="cycle-panel">{render_svg_icon("cycle", "cycle-icon")}<div><div class="cycle-panel-label">CURRENT CYCLE STATE</div>'
+            f'<div class="cycle-panel-value">{safe_text(cycle_detail)}<br>Current cycle state: <b>{safe_text(current_state)}</b></div></div></div>'
+        )
     render_capability_matrix(result)
 
 
 def render_network_intelligence(result: Optional[Dict[str, Any]]) -> None:
-    st.markdown('### NETWORK INTELLIGENCE')
+    render_section_header("NETWORK INTELLIGENCE", "Topology · environment · geofence policy · critical assets")
     enabled = st.toggle("Geofencing Monitoring", value=get_system().geofencing_monitoring_enabled)
     get_system().set_geofencing_monitoring(enabled)
     st.caption("HARIS creates and cleans up geofence subscriptions only when policy and a playbook require it.")
@@ -1844,7 +2043,7 @@ def render_network_intelligence(result: Optional[Dict[str, Any]]) -> None:
 
 
 def render_trusted_dispatch(result: Optional[Dict[str, Any]], supervisory: Optional[Dict[str, Any]] = None) -> None:
-    st.markdown('### TRUSTED DISPATCH')
+    render_section_header("TRUSTED DISPATCH", "Privileged field intervention only · WARDEN-owned trust authority")
     if settings.haris_backend_url:
         try:
             payload = run_async(backend_request("GET", "/api/nac/autonomous/status"))
@@ -1910,7 +2109,7 @@ def render_trusted_dispatch(result: Optional[Dict[str, Any]], supervisory: Optio
 
 def render_history_audit(result: Optional[Dict[str, Any]], supervisory: Optional[Dict[str, Any]] = None) -> None:
     render_history(supervisory)
-    st.markdown('### LEARNED MEMORY')
+    render_section_header("LEARNED MEMORY")
     st.json((result or {}).get("learning") or {"status": "No completed cycle in this session."})
 
 
@@ -1918,8 +2117,22 @@ def render_history_audit(result: Optional[Dict[str, Any]], supervisory: Optional
 # Main render
 # ============================================================================
 
+def render_decorative_background() -> None:
+    """Static command-center artwork; it never represents HARIS telemetry."""
+    render_html(
+        """
+        <div class="haris-decor" aria-hidden="true">
+          <svg class="haris-topology-lines" viewBox="0 0 520 300"><g fill="none" stroke="#4daeff" stroke-width="1"><path opacity=".45" d="M-20 44 105 16l82 73 91-42 90 68 165-50"/><path opacity=".3" d="M-5 155 91 98l98 74 91-42 91 70 166-23"/><path opacity=".25" d="M30 238 111 164l94 58 96-46 102 70 142-19"/></g><g fill="#8ce8ff"><circle cx="105" cy="16" r="3"/><circle cx="187" cy="89" r="2.5"/><circle cx="278" cy="47" r="3"/><circle cx="368" cy="115" r="2.5"/><circle cx="91" cy="98" r="2"/><circle cx="280" cy="130" r="3"/><circle cx="403" cy="246" r="2"/></g></svg>
+          <svg class="haris-globe" viewBox="0 0 800 800"><defs><radialGradient id="haris-globe-fill"><stop stop-color="#0b315a" stop-opacity=".23"/><stop offset=".72" stop-color="#061b35" stop-opacity=".45"/><stop offset="1" stop-color="#020810" stop-opacity="0"/></radialGradient><clipPath id="haris-globe-clip"><circle cx="400" cy="400" r="320"/></clipPath></defs><circle cx="400" cy="400" r="320" fill="url(#haris-globe-fill)" stroke="#4daeff" stroke-opacity=".42" stroke-width="2"/><g clip-path="url(#haris-globe-clip)" fill="none" stroke="#58bdff" stroke-opacity=".25" stroke-width="1"><ellipse cx="400" cy="400" rx="320" ry="96"/><ellipse cx="400" cy="400" rx="320" ry="190"/><ellipse cx="400" cy="400" rx="160" ry="320"/><ellipse cx="400" cy="400" rx="258" ry="320"/><path d="M90 295c155 38 310 23 610 20M84 430c160-29 390 52 632-8M128 554c203-43 392 4 544-42"/><path d="M180 154c78 118 74 326 20 517M402 80c-25 210 33 377 8 645M624 145c-103 165-74 387 1 528"/></g><g fill="#83ddff" opacity=".72"><circle cx="265" cy="227" r="3"/><circle cx="389" cy="185" r="3"/><circle cx="542" cy="268" r="2.6"/><circle cx="337" cy="350" r="3"/><circle cx="483" cy="413" r="3"/><circle cx="238" cy="485" r="2.6"/><circle cx="577" cy="535" r="3"/></g><g stroke="#7edfff" stroke-opacity=".32" fill="none"><path d="M265 227 389 185l153 83-59 145-146-63-99 135 239 50 101 0"/><path d="M238 485 337 350M483 413l94 122"/></g><circle cx="630" cy="121" r="7" fill="#c5f6ff" opacity=".9"/><circle cx="630" cy="121" r="28" fill="none" stroke="#8deaff" stroke-opacity=".44"/></svg>
+          <svg class="haris-floor-grid" viewBox="0 0 1400 300" preserveAspectRatio="none"><g fill="none" stroke="#3d8ed0" stroke-width="1"><path opacity=".45" d="M0 300 500 80 1000 80 1400 300"/><path opacity=".28" d="M0 300 550 118 850 118 1400 300"/><path opacity=".18" d="M0 300 590 150 810 150 1400 300"/><path opacity=".32" d="M250 300 500 80M450 300 590 80M650 300 680 80M850 300 770 80M1050 300 860 80M1250 300 950 80"/></g></svg>
+        </div>
+        """
+    )
+
+
 def render_console() -> None:
     """Render the Streamlit entry point without executing it on test import."""
+    render_decorative_background()
     supervisory = authoritative_supervisory_status()
     result = (supervisory or {}).get("cycle") or st.session_state.get("last_result")
     render_status_bar(result, supervisory)
@@ -1927,7 +2140,6 @@ def render_console() -> None:
         "HARIS CONSOLE", ["OVERVIEW", "NETWORK INTELLIGENCE", "AUTONOMOUS OPERATIONS", "TRUSTED DISPATCH", "HISTORY & AUDIT"],
         horizontal=True, label_visibility="collapsed",
     )
-    st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
 
     if section == "OVERVIEW":
         render_overview(result, supervisory)
@@ -1946,8 +2158,8 @@ def render_console() -> None:
     render_html(
         """
         <div class="footer">
-            HARIS · Theme 6 — Climate Resilience & Environmental Monitoring ·
-            GSMA MENA Ignite Hackathon 2026 · Live Network Resilience Console
+            <span>GSMA MENA IGNITE HACKATHON 2026</span>
+            <span>RESILIENT &nbsp; | &nbsp; SECURE &nbsp; | &nbsp; SUSTAINABLE &nbsp; | &nbsp; CONNECTED</span>
         </div>
         """
     )

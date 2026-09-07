@@ -221,6 +221,10 @@ class AppSettings(BaseSettings):
     gemini_model: str = "gemini-2.5-flash"
     groq_model: str = "llama-3.3-70b-versatile"
 
+    # Durable audit persistence is backend-only. Configure these exclusively on
+    # Render/FastAPI; Streamlit consumes the sanitized backend history API and
+    # must never receive SUPABASE_KEY.
+    haris_history_persistence_enabled: bool = False
     supabase_url: Optional[str] = None
     supabase_key: Optional[SecretStr] = None
     mem0_api_key: Optional[SecretStr] = None
@@ -273,6 +277,10 @@ class AppSettings(BaseSettings):
     @property
     def has_supabase(self) -> bool:
         return bool(self.supabase_url and self.supabase_key)
+
+    @property
+    def has_durable_history(self) -> bool:
+        return bool(self.haris_history_persistence_enabled and self.has_supabase)
 
     @property
     def has_mem0(self) -> bool:

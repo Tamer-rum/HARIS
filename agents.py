@@ -5,6 +5,7 @@ import logging
 import re
 import time
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, TypedDict
 
 from pydantic import BaseModel, Field
@@ -343,6 +344,7 @@ class HarisAgentSystem:
             "dispatch_history": cycle.get("dispatch_history", []),
             "audit": {
                 "chain": self.memory.verify_audit_chain(),
+                "persistence": self.memory.persistence_status,
                 "records": records,
             },
         })
@@ -373,6 +375,8 @@ class HarisAgentSystem:
             outcome=dispatch.get("status", state.get("final_status", "unknown")).lower(),
             cycle_id=state.get("cycle_id"),
             mode=self.settings.nac_mode,
+            checkpoint_type="trusted_dispatch_transition",
+            checkpoint_ordinal=len(trusted_dispatch_history.for_incident(incident.incident_id)),
             audit={
                 "incident": state.get("incident", {}),
                 "trusted_dispatch": dispatch,
@@ -2379,6 +2383,12 @@ class HarisAgentSystem:
             outcome=outcome,
             cycle_id=state.get("cycle_id"),
             mode=self.settings.nac_mode,
+            checkpoint_type="learn",
+            checkpoint_ordinal=0,
+            completed_at=(
+                datetime.now(timezone.utc).isoformat()
+                if outcome != "identity_verification_pending" else None
+            ),
             audit={
                 "environment": {"dust_advisory": state.get("dust_advisory"), "source": state.get("environmental_source")},
                 "field_intervention_evidence": state.get("field_intervention_evidence", {}),
