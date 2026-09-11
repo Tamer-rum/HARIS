@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 from durable_core import (
     ActionCommand, ActionState, InMemoryRepositoryBundle, IncidentState,
-    RecoveryState, RepositoryUnavailable,
+    ProjectionIntegrityError, RecoveryState, RepositoryUnavailable,
 )
 from durable_execution import ActionVerificationResult, DurableActionExecutionService
 from durable_reconciliation import DurableActionReconciliationService
@@ -120,6 +120,30 @@ class ReconciliationOnlyServiceTests(unittest.TestCase):
         ))
         return result, adapter
 
+    def add_provider_attempt(self, outcome, *, command_id=None, terminal=False):
+        verification_id = f"provider-{outcome}-{command_id or self.original.command_id}"
+        self.bundle.verification.save({
+            "verification_id": verification_id,
+            "incident_id": self.incident_id,
+            "evidence_event_ids": [],
+            "verification_type": "PROVIDER_RECONCILIATION",
+            "state": "PENDING",
+            "started_at": NOW,
+            "updated_at": NOW,
+            "reason": "intermediate_provider_observation",
+            "source_provenance": "NOKIA_LIVE",
+            "result": {
+                "command_id": command_id or self.original.command_id,
+                "attempt_number": 1,
+                "outcome": outcome,
+                "provider_state": "AVAILABLE",
+                "provenance": "NOKIA_LIVE",
+                "terminal": terminal,
+                "mutation_retry_performed": False,
+            },
+        })
+        return verification_id
+
     def test_terminal_readback_finalizes_existing_cleanup_without_mutation(self):
         result, adapter = self.reconcile()
         self.assertEqual(result.status, "CLEANUP_VERIFIED")
@@ -131,6 +155,70 @@ class ReconciliationOnlyServiceTests(unittest.TestCase):
         self.assertEqual(self.bundle.incidents.get(self.incident_id)["state"], IncidentState.RESOLVED.value)
         self.assertEqual(self.bundle.recovery.for_incident(self.incident_id)["state"], RecoveryState.COMPLETE.value)
         self.assertIsNone(self.bundle.resource_ownership.get_active(self.original.resource_key))
+
+    def test_verified_cleanup_terminalizes_superseded_attempts_without_changing_network_truth(self):
+        available = self.add_provider_attempt("PROVIDER_AVAILABLE")
+        waiting = self.add_provider_attempt("WAITING_FOR_PROVIDER")
+        network_id = "network-unchanged"
+        self.bundle.verification.save({
+            "verification_id": network_id, "incident_id": self.incident_id,
+            "evidence_event_ids": [], "verification_type": "NETWORK_ACTION",
+            "state": "UNCHANGED", "started_at": NOW, "updated_at": NOW,
+            "reason": "network_unchanged", "source_provenance": "NOKIA_LIVE",
+            "result": {"command_id": self.original.command_id,
+                       "outcome": "VERIFIED_NO_IMPROVEMENT",
+                       "mitigation_improved": False},
+        })
+
+        result, adapter = self.reconcile()
+
+        self.assertEqual(result.status, "CLEANUP_VERIFIED")
+        for verification_id in (available, waiting):
+            row = self.bundle.verification.get(verification_id)
+            self.assertEqual(row["state"], "INSUFFICIENT_EVIDENCE")
+            self.assertEqual(row["reason"], "superseded_by_verified_terminal_cleanup")
+            self.assertNotEqual(row["state"], "IMPROVED")
+        self.assertEqual(self.bundle.verification.get(network_id)["state"], "UNCHANGED")
+        cleanup_rows = [
+            row for row in self.bundle.verification.for_incident(self.incident_id)
+            if row.get("verification_type") == "ROLLBACK_RECONCILIATION"
+        ]
+        self.assertEqual(len(cleanup_rows), 1)
+        self.assertEqual(cleanup_rows[0]["state"], "IMPROVED")
+        self.assertEqual(self.bundle.recovery.for_incident(self.incident_id)["state"], "COMPLETE")
+        incident = self.bundle.incidents.get(self.incident_id)
+        self.assertEqual(incident["state"], "RESOLVED")
+        self.assertEqual(incident["outcome"], "ROLLED_BACK_SAFELY")
+        self.assertEqual(adapter.execute_count, 0)
+        self.assertEqual(adapter.rollback_count, 0)
+        reconstructed = __import__("platform_lifecycle").reconstruct_platform_state(self.bundle)
+        self.assertEqual(reconstructed.pending_verifications, [])
+
+    def test_unrelated_pending_verification_on_terminal_incident_remains_fail_closed(self):
+        self.add_provider_attempt("PROVIDER_AVAILABLE", command_id="different-action")
+        self.reconcile()
+        with self.assertRaises(ProjectionIntegrityError):
+            __import__("platform_lifecycle").reconstruct_platform_state(self.bundle)
+
+    def test_verified_cleanup_replay_closes_crash_window_without_provider_read(self):
+        pending = self.add_provider_attempt("WAITING_FOR_PROVIDER")
+        self.bundle.verification.save({
+            "verification_id": f"reconcile-cleanup-{self.cleanup.command_id}-1",
+            "incident_id": self.incident_id, "evidence_event_ids": [],
+            "verification_type": "ROLLBACK_RECONCILIATION",
+            "state": "IMPROVED", "started_at": NOW, "updated_at": NOW,
+            "reason": "provider_resource_absent", "source_provenance": "NOKIA_LIVE",
+            "result": {"command_id": self.cleanup.command_id, "attempt_number": 1,
+                       "outcome": "VERIFIED_ROLLBACK", "resource_inactive": True},
+        })
+        first, adapter = self.reconcile("ERROR")
+        self.assertEqual(first.status, "CLEANUP_VERIFIED")
+        self.assertEqual(adapter.rollback_reads, 0)
+        self.assertEqual(self.bundle.verification.get(pending)["state"], "INSUFFICIENT_EVIDENCE")
+        second, adapter = self.reconcile("ERROR")
+        self.assertEqual((second.status, second.duplicate), ("CLEANUP_VERIFIED", True))
+        self.assertEqual(adapter.rollback_reads, 0)
+        self.assertEqual(self.bundle.verification.get(pending)["state"], "INSUFFICIENT_EVIDENCE")
 
     def test_active_readback_preserves_reconciliation_required(self):
         result, adapter = self.reconcile("VERIFICATION_UNAVAILABLE")

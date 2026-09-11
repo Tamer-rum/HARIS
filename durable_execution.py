@@ -511,13 +511,14 @@ class DurableActionExecutionService:
             or not original.provider_resource_id
         ):
             raise RepositoryUnavailable("validation_cleanup_binding_invalid")
-        if cleanup.state is ActionState.ROLLED_BACK:
-            return original
         if cleanup.state not in {
             ActionState.ACKNOWLEDGED, ActionState.OUTCOME_UNKNOWN,
-            ActionState.RECONCILIATION_REQUIRED,
+            ActionState.RECONCILIATION_REQUIRED, ActionState.ROLLED_BACK,
         }:
             raise RepositoryUnavailable("validation_cleanup_not_reconcilable")
+        self._finalize_superseded_provider_reconciliation(original, cleanup)
+        if cleanup.state is ActionState.ROLLED_BACK:
+            return original
 
         completed_cleanup = self._update_action(cleanup, ActionState.ROLLED_BACK)
         current_original = self.bundle.actions.get(original.command_id) or original
@@ -548,6 +549,37 @@ class DurableActionExecutionService:
             self.bundle.resource_ownership.release(original.resource_key, original.incident_id, now, int(owner.get("version", 0)))
         self._append_outbox(completed_cleanup, "ROLLED_BACK", "rollback_reconciled_and_verified")
         return current_original
+
+    def _finalize_superseded_provider_reconciliation(
+        self, original: ActionCommand, cleanup: ActionCommand,
+    ) -> None:
+        """Close intermediate attempts superseded by proven cleanup."""
+        records = self.bundle.verification.for_incident(original.incident_id)
+        cleanup_proven = any(
+            row.get("verification_type") == "ROLLBACK_RECONCILIATION"
+            and row.get("state") == VerificationState.IMPROVED.value
+            and (row.get("result") or {}).get("command_id") == cleanup.command_id
+            and (row.get("result") or {}).get("outcome") == "VERIFIED_ROLLBACK"
+            and (row.get("result") or {}).get("resource_inactive") is True
+            for row in records
+        )
+        if not cleanup_proven:
+            raise RepositoryUnavailable("verified_cleanup_evidence_missing")
+        now = time.time()
+        for row in records:
+            result = row.get("result") or {}
+            if (
+                row.get("verification_type") == "PROVIDER_RECONCILIATION"
+                and row.get("state") == VerificationState.PENDING.value
+                and result.get("command_id") == original.command_id
+                and result.get("outcome") in {"PROVIDER_AVAILABLE", "WAITING_FOR_PROVIDER"}
+                and result.get("terminal") is False
+            ):
+                finalized = copy.deepcopy(row)
+                finalized["state"] = VerificationState.INSUFFICIENT_EVIDENCE.value
+                finalized["updated_at"] = now
+                finalized["reason"] = "superseded_by_verified_terminal_cleanup"
+                self.bundle.verification.save(finalized)
 
     def _capability_context(self, action: ActionCommand) -> Dict[str, Any]:
         slice_status = "UNAVAILABLE"
