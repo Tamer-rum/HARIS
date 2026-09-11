@@ -75,6 +75,44 @@ class FinalFrontendPolishTests(unittest.TestCase):
         store._incidents[0].outcome = "tampered"
         self.assertFalse(store.verify_audit_chain()["valid"])
 
+    def test_durable_history_and_separate_audit_truth_are_not_conflated(self):
+        durable = {
+            "mode": "postgres", "status": "READY", "repository_ready": True,
+            "reconstruction": "COMPLETE",
+        }
+        caption = app.history_storage_caption(durable)
+        self.assertIn("DURABLE_REPOSITORY (PostgreSQL/Supabase)", caption)
+        self.assertIn("tamper-evident, append-only audit-chain", caption)
+        self.assertNotIn("process-local memory", caption)
+        self.assertNotIn("configure Supabase", caption)
+        self.assertNotIn("immutable", caption.lower())
+        self.assertNotIn("cryptographically signed", caption.lower())
+        self.assertEqual(app.audit_chain_presentation({})[0], "UNAVAILABLE")
+        self.assertNotEqual(app.audit_chain_presentation({})[0], "VALID")
+
+    def test_capability_cards_prioritize_validation_truth_over_generic_ready(self):
+        configured = {"status": "SUPPORTED_AND_CONFIGURED", "reason": None}
+        self.assertEqual(app.capability_presentation("qod", configured)[0], "REAL_PARTIAL")
+        self.assertEqual(app.capability_presentation("slicing", configured)[0], "SANDBOX_LIMITED")
+        self.assertEqual(
+            app.capability_presentation("geofencing", configured)[0],
+            "FAIL_CLOSED_AUTH_UNPROVEN",
+        )
+        trusted = app.capability_presentation("trusted_dispatch", {
+            "status": "PRIVILEGED_ONLY",
+            "reason": "Number Verification + SIM Swap; privileged field intervention only.",
+        })
+        self.assertEqual(trusted[0], "PRIVILEGED ONLY")
+        self.assertIn("REAL_VALIDATED / PRIVILEGED_ONLY", trusted[1])
+        self.assertIn("Number Verification + SIM Swap", trusted[1])
+        self.assertIn("network verification was UNCHANGED", app.capability_presentation("qod", configured)[1])
+        self.assertIn("not OPERATING", app.capability_presentation("slicing", configured)[1])
+        self.assertIn("numeric fixture KPI is simulated", app.capability_presentation("congestion_insights", {"status": "READ_READY"})[1])
+        self.assertIn(
+            '("location", "Location Retrieval")',
+            Path("app.py").read_text(encoding="utf-8"),
+        )
+
     def test_09_deployed_autonomous_run_uses_backend_authority_with_local_fallback(self):
         controls_start = self.source.index("def render_controls()")
         controls = self.source[controls_start:self.source.index("def render_", controls_start + 4)]

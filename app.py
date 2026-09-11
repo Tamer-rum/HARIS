@@ -991,7 +991,7 @@ def render_capability_matrix(result: Optional[Dict[str, Any]]) -> None:
     ]
     display = {
         "READ_READY": "READ READY",
-        "SUPPORTED_AND_CONFIGURED": "READY",
+        "SUPPORTED_AND_CONFIGURED": "CONFIGURED",
         "SDK_SUPPORTED_CONFIG_MISSING": "CONFIG MISSING",
         "OPERATOR_VALUE_REQUIRED": "OPERATOR RESOURCE REQUIRED",
         "SDK_UNSUPPORTED": "UNAVAILABLE",
@@ -1005,14 +1005,51 @@ def render_capability_matrix(result: Optional[Dict[str, Any]]) -> None:
     }
     for index, (key, label) in enumerate(labels):
         item = report.get(key, {"status": "PRIVILEGED_ONLY", "reason": "Number Verification + SIM Swap; privileged field intervention only."})
-        status = display.get(item.get("status"), str(item.get("status", "UNKNOWN")).replace("_", " "))
-        truth = item.get("truth_status")
-        provenance = item.get("provenance")
-        detail = item.get("reason") or "Capability configuration is available."
-        if truth:
-            detail = f"{truth} · {provenance or 'UNAVAILABLE'} · {detail}"
+        status, detail = capability_presentation(key, item, display)
         with columns[index % 3]:
             render_html(capability_card(label, status, detail, icons[key]))
+
+
+def capability_presentation(
+    key: str, item: Dict[str, Any], display: Optional[Dict[str, str]] = None,
+) -> tuple[str, str]:
+    """Keep configuration readiness distinct from validation truth."""
+    display = display or {
+        "READ_READY": "READ READY",
+        "SUPPORTED_AND_CONFIGURED": "CONFIGURED",
+        "SDK_SUPPORTED_CONFIG_MISSING": "CONFIG MISSING",
+        "OPERATOR_VALUE_REQUIRED": "OPERATOR RESOURCE REQUIRED",
+        "SDK_UNSUPPORTED": "UNAVAILABLE",
+        "PRIVILEGED_ONLY": "PRIVILEGED ONLY",
+    }
+    configured = display.get(
+        item.get("status"), str(item.get("status", "UNKNOWN")).replace("_", " "),
+    )
+    fallback_truth = {
+        "congestion_insights": "READ_VALIDATED / POLLING_APPROPRIATE",
+        "device_status": "READ_VALIDATED / POLLING_APPROPRIATE",
+        "location": "READ_VALIDATED",
+        "geofencing": "FAIL_CLOSED_AUTH_UNPROVEN",
+        "qod": "REAL_PARTIAL",
+        "slicing": "SANDBOX_LIMITED",
+        "trusted_dispatch": "REAL_VALIDATED / PRIVILEGED_ONLY",
+    }
+    truth = item.get("truth_status") or fallback_truth.get(key)
+    provenance = item.get("provenance") or "UNAVAILABLE"
+    fallback_reason = {
+        "congestion_insights": "Live categorical capability; numeric fixture KPI is simulated.",
+        "device_status": "Live reachability capability; battery, tier, roaming, and cell fields are HARIS/fixture metadata.",
+        "location": "Location Retrieval is implemented.",
+        "geofencing": "Authenticated callback provenance is not proven; events remain fail-closed.",
+        "qod": "Real provider lifecycle was accepted; network verification was UNCHANGED and cleanup was verified.",
+        "slicing": "AVAILABLE was observed, not OPERATING; no live Tier-1 attachment is proven.",
+        "trusted_dispatch": "Number Verification + SIM Swap are used only for privileged field intervention.",
+    }
+    reason = item.get("reason") or fallback_reason.get(key) or "Capability configuration is available."
+    if key in {"geofencing", "qod", "slicing"} and truth:
+        return str(truth), f"Configuration: {configured} · {provenance} · {reason}"
+    detail = f"{truth} · {provenance} · {reason}" if truth else reason
+    return configured, detail
 
 
 def render_environment(result: Optional[Dict[str, Any]]) -> None:
@@ -1974,35 +2011,70 @@ def history_storage_status(memory: Any) -> Dict[str, Any]:
     return status if isinstance(status, dict) else fallback
 
 
+def durable_history_available(status: Any) -> bool:
+    """Recognize only an authoritative, ready durable repository."""
+    status = safe_mapping(status)
+    if status.get("durable") is True and status.get("available", True):
+        return True
+    return (
+        str(status.get("mode") or "").lower() == "postgres"
+        and status.get("repository_ready") is True
+        and str(status.get("status") or "").upper() == "READY"
+        and str(status.get("reconstruction") or "").upper() == "COMPLETE"
+    )
+
+
+def history_storage_caption(status: Any) -> str:
+    """Describe operational history separately from audit-chain availability."""
+    if durable_history_available(status):
+        return (
+            "Operational history storage: DURABLE_REPOSITORY (PostgreSQL/Supabase). "
+            "This is separate from the tamper-evident, append-only audit-chain status shown above."
+        )
+    if not safe_mapping(status).get("available", True):
+        return "Operational history storage: unavailable."
+    return "Operational history storage: process-local memory; restart persistence is unavailable."
+
+
+def audit_chain_presentation(chain: Any) -> tuple[str, str, str]:
+    """Present separate audit-chain truth without inferring availability."""
+    chain = safe_mapping(chain)
+    available = bool(chain)
+    valid = bool(chain.get("valid"))
+    legacy = not valid and str(chain.get("reason") or "").startswith("legacy_")
+    state = "VALID" if valid else ("LEGACY" if legacy else ("INVALID" if available else "UNAVAILABLE"))
+    css = "" if valid else (" legacy" if legacy else (" invalid" if available else ""))
+    symbol = "&#10003;" if valid else ("&#9888;" if legacy else "&#215;")
+    return state, css, symbol
+
+
 def render_history(supervisory: Optional[Dict[str, Any]] = None) -> None:
     render_section_header("HISTORY & AUDIT", "Incident replay · trusted dispatch history · tamper-evident evidence")
     backend_audit = (supervisory or {}).get("audit") if settings.haris_backend_url else None
     if backend_audit is not None:
         records = backend_audit.get("records", [])
         chain = backend_audit.get("chain", {})
-        persistence = backend_audit.get("persistence") or chain.get("persistence") or {}
+        persistence = (
+            backend_audit.get("persistence")
+            or chain.get("persistence")
+            or safe_mapping(supervisory).get("persistence")
+            or {}
+        )
     else:
         memory = get_system().memory
         records = memory.recent_incidents()
         chain = memory.verify_audit_chain()
         persistence = history_storage_status(memory)
-    audit_available = bool(chain)
-    audit_valid = bool(chain.get("valid"))
-    legacy_chain = not audit_valid and str(chain.get("reason") or "").startswith("legacy_")
-    audit_state = "VALID" if audit_valid else ("LEGACY" if legacy_chain else ("INVALID" if audit_available else "UNAVAILABLE"))
-    audit_class = "" if audit_valid else (" legacy" if legacy_chain else (" invalid" if audit_available else ""))
+    audit_state, audit_class, audit_symbol = audit_chain_presentation(chain)
     render_html(
         f'<div class="audit-chain-card{audit_class}">'
-        f'<div class="audit-chain-symbol">{"&#10003;" if audit_valid else ("&#9888;" if legacy_chain else "&#215;")}</div>'
+        f'<div class="audit-chain-symbol">{audit_symbol}</div>'
         f'<div><div class="audit-chain-title">TAMPER-EVIDENT AUDIT CHAIN</div>'
         f'<div class="audit-chain-value">AUDIT CHAIN: {audit_state}</div></div></div>'
     )
     if not persistence.get("available", True):
         st.warning("Durable audit persistence is unavailable; this cycle remains safety-controlled but was not confirmed as durably saved.")
-    elif persistence.get("durable"):
-        st.caption("History storage: durable append-only backend repository.")
-    else:
-        st.caption("History storage: process-local memory (configure Supabase for restart-safe deployment history).")
+    st.caption(history_storage_caption(persistence))
     durable_history = (supervisory or {}).get("incident_history") or []
     timeline = (supervisory or {}).get("timeline") or []
     if timeline:
