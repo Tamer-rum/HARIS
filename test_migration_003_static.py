@@ -3,6 +3,8 @@ import re
 import unittest
 from pathlib import Path
 
+from external.validate_real_qod_closed_loop import _canonical_migration_bytes
+
 
 MIGRATION_002_SHA256 = "7afe3fb2b16def35d6b73a0ec5d17ee95f0462de9d64523d7ef5c231e9dead1f"
 TARGETS = {
@@ -49,7 +51,7 @@ class Migration003StaticValidation(unittest.TestCase):
 
     def test_migration_002_is_byte_for_byte_unchanged(self):
         payload=Path("supabase/migrations/002_haris_durable_event_incident_core.sql").read_bytes()
-        self.assertEqual(hashlib.sha256(payload).hexdigest(),MIGRATION_002_SHA256)
+        self.assertEqual(hashlib.sha256(_canonical_migration_bytes(payload)).hexdigest(),MIGRATION_002_SHA256)
 
     def test_only_the_eight_intended_functions_are_replaced(self):
         self.assertEqual(set(self.current_functions),set(TARGETS))

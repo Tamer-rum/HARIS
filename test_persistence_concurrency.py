@@ -4,6 +4,8 @@ import io
 import json
 import os
 from pathlib import Path
+
+from external.validate_real_qod_closed_loop import _canonical_migration_bytes
 import subprocess
 import tempfile
 import unittest
@@ -284,7 +286,8 @@ class PersistenceConcurrencyValidatorTests(unittest.TestCase):
         }
         root = Path("supabase/migrations")
         for name, digest in expected.items():
-            self.assertEqual(hashlib.sha256((root / name).read_bytes()).hexdigest(), digest)
+            payload = _canonical_migration_bytes((root / name).read_bytes())
+            self.assertEqual(hashlib.sha256(payload).hexdigest(), digest)
 
 
 if __name__ == "__main__":

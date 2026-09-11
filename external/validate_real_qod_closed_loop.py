@@ -43,6 +43,11 @@ FROZEN_MIGRATION_HASHES = {
     "004_haris_outbox_claim_isolation.sql": "bd898186e26b60c8807a588760779c1a86d73c136b81089206f228427a5210d5",
     "005_haris_outbox_per_run_isolation.sql": "4f18b170281c78cf4611085633d31b24ebbdeDD9a85f5e6d022e73e9a26a1faf".lower(),
 }
+
+
+def _canonical_migration_bytes(raw: bytes) -> bytes:
+    """Normalize only platform line endings for checkout-portable hashing."""
+    return raw.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
 SAFE_OUTPUT_KEYS = frozenset({
     "status", "stage", "run_id", "capability", "target_alias", "target_count",
     "scope", "persistence_required", "warden_required", "live_write_required",
@@ -197,7 +202,10 @@ def _migration_checks(root: Path = PROJECT_ROOT) -> list[Dict[str, Any]]:
     checks = []
     for name, expected in FROZEN_MIGRATION_HASHES.items():
         path = root / "supabase" / "migrations" / name
-        actual = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "missing"
+        actual = (
+            hashlib.sha256(_canonical_migration_bytes(path.read_bytes())).hexdigest()
+            if path.is_file() else "missing"
+        )
         checks.append({"passed": actual == expected, "details": f"MIGRATION_{name[:3]}_FROZEN"})
     return checks
 

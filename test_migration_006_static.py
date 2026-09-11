@@ -3,6 +3,8 @@ import re
 import unittest
 from pathlib import Path
 
+from external.validate_real_qod_closed_loop import _canonical_migration_bytes
+
 FROZEN = {
     "002_haris_durable_event_incident_core.sql": "7afe3fb2b16def35d6b73a0ec5d17ee95f0462de9d64523d7ef5c231e9dead1f",
     "003_haris_conflict_status_alignment.sql": "8ef41c1d77eb4a44afc463cc4d618a56733bb83e12d3a5975ea6fb408b0e2122",
@@ -18,7 +20,8 @@ class Migration006StaticTests(unittest.TestCase):
     def test_prior_migrations_are_unchanged(self):
         root = Path("supabase/migrations")
         for name, digest in FROZEN.items():
-            self.assertEqual(hashlib.sha256((root / name).read_bytes()).hexdigest(), digest)
+            payload = _canonical_migration_bytes((root / name).read_bytes())
+            self.assertEqual(hashlib.sha256(payload).hexdigest(), digest)
 
     def test_scope_is_recovery_cas_only(self):
         self.assertIn("add column if not exists version bigint not null default 0", self.sql)

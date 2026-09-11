@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -22,7 +23,7 @@ from external.validate_real_qod_closed_loop import (
     ChallengeStore, EvidenceWriter, ProviderBudget, RealQodValidationController,
     DurableRealQodBackend, ValidationAbort, ValidationConfiguration,
     ValidationReasoningAgent,
-    _sanitize, build_live_backend, dry_run, main, preflight,
+    _canonical_migration_bytes, _sanitize, build_live_backend, dry_run, main, preflight,
 )
 from nokia_clients import CongestionReading, DeviceStatus, LiveNokiaClient
 from postgres_persistence import (
@@ -53,6 +54,37 @@ def valid_environment(**changes):
     }
     values.update(changes)
     return values
+
+
+class MigrationHashPortabilityTests(unittest.TestCase):
+    canonical_sql = b"begin;\nselect 1;\nrollback;\n"
+    expected = hashlib.sha256(canonical_sql).hexdigest()
+
+    def assert_frozen(self, payload: bytes) -> None:
+        actual = hashlib.sha256(_canonical_migration_bytes(payload)).hexdigest()
+        self.assertEqual(actual, self.expected)
+
+    def assert_changed(self, payload: bytes) -> None:
+        actual = hashlib.sha256(_canonical_migration_bytes(payload)).hexdigest()
+        self.assertNotEqual(actual, self.expected)
+
+    def test_lf_content_matches_frozen_identity(self):
+        self.assert_frozen(self.canonical_sql)
+
+    def test_crlf_equivalent_matches_frozen_identity(self):
+        self.assert_frozen(self.canonical_sql.replace(b"\n", b"\r\n"))
+
+    def test_cr_equivalent_matches_frozen_identity(self):
+        self.assert_frozen(self.canonical_sql.replace(b"\n", b"\r"))
+
+    def test_substantive_sql_token_change_fails(self):
+        self.assert_changed(self.canonical_sql.replace(b"select 1", b"select 2"))
+
+    def test_added_sql_statement_fails(self):
+        self.assert_changed(self.canonical_sql + b"select 2;\n")
+
+    def test_removed_sql_content_fails(self):
+        self.assert_changed(b"begin;\nrollback;\n")
 
 
 def config(**changes):

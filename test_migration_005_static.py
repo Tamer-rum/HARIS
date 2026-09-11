@@ -3,6 +3,8 @@ import re
 import unittest
 from pathlib import Path
 
+from external.validate_real_qod_closed_loop import _canonical_migration_bytes
+
 
 FROZEN_HASHES = {
     "002_haris_durable_event_incident_core.sql": "7afe3fb2b16def35d6b73a0ec5d17ee95f0462de9d64523d7ef5c231e9dead1f",
@@ -74,7 +76,8 @@ class Migration005StaticValidation(unittest.TestCase):
         root = Path("supabase/migrations")
         for name, expected in FROZEN_HASHES.items():
             with self.subTest(migration=name):
-                self.assertEqual(hashlib.sha256((root / name).read_bytes()).hexdigest(), expected)
+                payload = _canonical_migration_bytes((root / name).read_bytes())
+                self.assertEqual(hashlib.sha256(payload).hexdigest(), expected)
 
     def test_replaces_only_existing_claim_rpc_with_exact_signature(self):
         functions = re.findall(r"create\s+or\s+replace\s+function\s+public\.(haris_[a-z_]+)", self.sql, re.I)
