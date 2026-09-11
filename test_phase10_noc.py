@@ -145,6 +145,45 @@ class Phase10DurableNocTests(unittest.TestCase):
         self.assertEqual(metrics["reconciliation_pending"], 0)
         self.assertEqual(metrics["websocket_clients_scope"], "PROCESS_LOCAL_DELIVERY_ONLY")
 
+    def test_live_reconciliation_metric_excludes_only_persistence_test_actions(self):
+        core = run_api.get_durable_core()
+        now = time.time()
+        reconciliation_states = (
+            ActionState.SENT,
+            ActionState.OUTCOME_UNKNOWN,
+            ActionState.RECONCILIATION_REQUIRED,
+        )
+        for index, state in enumerate(reconciliation_states):
+            core.actions.create_or_get(ActionCommand(
+                incident_id=f"PERSISTENCE-TEST-incident-{index}",
+                command_type="PERSISTENCE_TEST_NO_PROVIDER",
+                resource_key=f"PERSISTENCE-TEST-resource-{index}",
+                device_id=None,
+                plan_version=0,
+                requested_at=now + index,
+                state=state,
+            ))
+
+        filtered = run_api._authoritative_snapshot()["operational_metrics"]
+        self.assertEqual(filtered["reconciliation_pending"], 0)
+        self.assertEqual(
+            run_api._platform_lifecycle.metrics.reconciliation_required_actions, 0,
+        )
+
+        for index, state in enumerate(reconciliation_states):
+            core.actions.create_or_get(ActionCommand(
+                incident_id=f"inc-operational-{index}",
+                command_type="QOD_PLAN",
+                resource_key=f"device:operational-{index}",
+                device_id=f"operational-{index}",
+                plan_version=1,
+                requested_at=now + 10 + index,
+                state=state,
+            ))
+
+        operational = run_api._authoritative_snapshot()["operational_metrics"]
+        self.assertEqual(operational["reconciliation_pending"], 3)
+
     def test_health_separates_public_liveness_from_durable_readiness(self):
         with patch("run_api.get_settings", return_value=self.configured), patch(
             "nokia_clients.get_settings", return_value=self.configured

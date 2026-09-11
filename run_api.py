@@ -24,7 +24,10 @@ from postgres_persistence import (
     PersistenceSchemaNotReady, PersistenceTransportUnavailable,
     build_repository_bundle,
 )
-from platform_lifecycle import PlatformLifecycle, PlatformLifecycleState, reconstruct_platform_state
+from platform_lifecycle import (
+    PlatformLifecycle, PlatformLifecycleState, _integration_record,
+    reconstruct_platform_state,
+)
 from runtime import RuntimeEnvironment, external_access_policy, runtime_environment
 from runtime_events import (
     DurableOutboxWakeupConsumer, RuntimeEventIngestor,
@@ -467,7 +470,10 @@ def _durable_noc_read_model(core: DurablePlatformCore, *, limit: int = 50) -> di
             })
     timeline.sort(key=lambda row: (float(row.get("timestamp") or 0), str(row.get("incident_id")), str(row.get("type")), str(row.get("action_id") or "")))
     pending_actions = core.actions.pending_or_unknown()
-    pending_reconciliation = core.actions.reconciliation_required()
+    pending_reconciliation = [
+        action for action in core.actions.reconciliation_required()
+        if not _integration_record(action)
+    ]
     metrics = {
         "authority": "DURABLE_REPOSITORY",
         "active_incidents": len(core.incidents.active()),
