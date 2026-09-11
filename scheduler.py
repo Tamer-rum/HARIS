@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional
 
 from agents import HarisAgentSystem
 from config import AppSettings
+from runtime import external_access_policy
 
 logger = logging.getLogger("haris.scheduler")
 
@@ -27,6 +28,8 @@ class HarisScheduler:
     async def start(self) -> bool:
         if self._running:
             return False
+        if external_access_policy().is_test and self.settings.nac_mode == "live_write":
+            raise RuntimeError("Continuous LIVE_WRITE is blocked in HARIS TEST runtime.")
         if self.settings.nac_mode == "live_write" and not self.settings.enable_live_write_loop:
             raise RuntimeError("Continuous LIVE_WRITE requires ENABLE_LIVE_WRITE_LOOP=true.")
         self._running = True
@@ -49,7 +52,7 @@ class HarisScheduler:
                 self.last_result = await self.system.run_cycle(dust_advisory=True)
                 self.cycles_completed += 1
                 self.last_error = None
-            except Exception as exc:  # isolate one bad cycle from the next
-                self.last_error = str(exc)
-                logger.exception("HARIS scheduled cycle failed")
+            except Exception:  # isolate one bad cycle from the next
+                self.last_error = "scheduled_cycle_failed"
+                logger.warning("HARIS scheduled cycle failed; details suppressed")
             await asyncio.sleep(self.settings.cycle_seconds)

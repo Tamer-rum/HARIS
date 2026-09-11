@@ -2,9 +2,23 @@ services:
   - type: web
     name: haris-api
     runtime: python
+    # Phase 11 release contract: process-local dispatch and rate limiting.
+    numInstances: 1
     buildCommand: pip install -r requirements.txt
+    # run_api.py also pins uvicorn workers=1; do not replace with a multi-worker command.
     startCommand: python run_api.py
+    healthCheckPath: /api/platform/health
     envVars:
+      - key: HARIS_RUNTIME_ENV
+        value: production
+      - key: HARIS_PERSISTENCE_MODE
+        value: postgres
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
+      - key: HARIS_OPERATIONAL_API_TOKEN
+        sync: false
       - key: NAC_MODE
         value: fixture
       - key: ENABLE_CONTINUOUS_LOOP

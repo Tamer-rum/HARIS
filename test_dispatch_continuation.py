@@ -21,6 +21,17 @@ class DispatchContinuationTests(unittest.TestCase):
         number_verification_states._pending = {}
         trusted_dispatch_history._attempts = []
         verified_identities._verified_at = {}
+        self.api_token = "test-operational-token"
+        self.api_headers = {"Authorization": f"Bearer {self.api_token}"}
+        self.api_settings = AppSettings(
+            nac_mode="fixture", haris_operational_api_token=self.api_token,
+            gemini_api_key=None, groq_api_key=None,
+        )
+        self.api_settings_patch = patch(
+            "nokia_clients.get_settings", return_value=self.api_settings
+        )
+        self.api_settings_patch.start()
+        self.addCleanup(self.api_settings_patch.stop)
 
     def test_pending_dispatch_binding_expiry_and_single_use(self):
         store = PendingDispatchStore()
@@ -184,8 +195,8 @@ class DispatchContinuationTests(unittest.TestCase):
         backend = BackendSystem()
         register_dispatch_system_factory(lambda: backend)
         with TestClient(api_app) as client:
-            response = client.post("/api/nac/autonomous/field-intervention-demo")
-            status = client.get("/api/nac/autonomous/status")
+            response = client.post("/api/nac/autonomous/field-intervention-demo", headers=self.api_headers)
+            status = client.get("/api/nac/autonomous/status", headers=self.api_headers)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(backend.calls, 1)
         self.assertEqual(response.json()["cycle"]["trusted_dispatch"]["masked_phone_number"], "***1000")
@@ -197,10 +208,10 @@ class DispatchContinuationTests(unittest.TestCase):
         token = response.json()["consent_action_token"]
         workflow = response.json()["workflow_session_token"]
         with TestClient(api_app) as client:
-            handoff = client.post("/api/nac/autonomous/consent-action", json={"action_token": token})
-            replay = client.post("/api/nac/autonomous/consent-action", json={"action_token": token})
-            wrong = client.post("/api/nac/autonomous/consent-action", json={"action_token": "x" * 32})
-            refreshed = client.post("/api/nac/autonomous/consent-action-token", json={"workflow_session_token": workflow})
+            handoff = client.post("/api/nac/autonomous/consent-action", json={"action_token": token}, headers=self.api_headers)
+            replay = client.post("/api/nac/autonomous/consent-action", json={"action_token": token}, headers=self.api_headers)
+            wrong = client.post("/api/nac/autonomous/consent-action", json={"action_token": "x" * 32}, headers=self.api_headers)
+            refreshed = client.post("/api/nac/autonomous/consent-action-token", json={"workflow_session_token": workflow}, headers=self.api_headers)
         self.assertEqual(handoff.status_code, 200)
         self.assertEqual(handoff.json()["authorization_url"], "https://nokia.example/consent")
         self.assertEqual(replay.status_code, 403)
@@ -245,7 +256,7 @@ class DispatchContinuationTests(unittest.TestCase):
         backend = BackendSystem()
         register_dispatch_system_factory(lambda: backend)
         with TestClient(api_app) as client:
-            response = client.post("/api/nac/autonomous/run")
+            response = client.post("/api/nac/autonomous/run", headers=self.api_headers)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(backend.calls, [True])
         cycle = response.json()["cycle"]
@@ -262,7 +273,7 @@ class DispatchContinuationTests(unittest.TestCase):
         backend = HarisAgentSystem(FixtureNokiaClient(settings), memory=memory, settings=settings)
         register_dispatch_system_factory(lambda: backend)
         with TestClient(api_app) as client:
-            response = client.post("/api/nac/autonomous/run")
+            response = client.post("/api/nac/autonomous/run", headers=self.api_headers)
         self.assertEqual(response.status_code, 200)
         cycle = response.json()["cycle"]
         self.assertEqual(cycle["final_status"], "mitigated")

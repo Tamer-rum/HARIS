@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import re
 import streamlit as st
+from streamlit.runtime.scriptrunner import get_script_run_ctx
 
 from agents import HarisAgentSystem
 from config import get_settings
@@ -83,7 +84,11 @@ def protected_tier1_count(result: Dict[str, Any]) -> str:
     if not isinstance(actions, list) or not isinstance(devices, list):
         return "N/A"
     tier1 = {safe_mapping(item).get("device_id") for item in devices if safe_mapping(item).get("tier") == 1}
-    targeted = {safe_mapping(action).get("device_id") for action in actions}
+    targeted = {
+        safe_mapping(action).get("device_id")
+        for action in actions
+        if safe_mapping(action).get("success") is True
+    }
     return str(len((tier1 & targeted) - {None}))
 
 
@@ -216,19 +221,30 @@ def overview_notifications(result: Optional[Dict[str, Any]], supervisory: Option
         notices.append(("warning", "ACTION REQUIRED", "Awaiting secure Nokia Number Verification consent for the selected engineer."))
     return notices
 
-st.set_page_config(
+def _streamlit_entry_active() -> bool:
+    """UI side effects are legal only under ``streamlit run``."""
+    return get_script_run_ctx(suppress_warning=True) is not None
+
+
+if _streamlit_entry_active():
+    st.set_page_config(
     page_title="HARIS — Network Resilience",
     page_icon="H",
     layout="wide",
-    initial_sidebar_state="collapsed",
-)
+        initial_sidebar_state="collapsed",
+    )
 
 
 # ============================================================================
 # CSS
 # ============================================================================
 
-st.markdown(
+def _render_global_css(content: str, *, unsafe_allow_html: bool = False) -> None:
+    if _streamlit_entry_active():
+        st.markdown(content, unsafe_allow_html=unsafe_allow_html)
+
+
+_render_global_css(
     """
 <style>
 :root {
@@ -721,6 +737,10 @@ div[data-testid="stButton"] button[kind="primary"]:active { border-color:#a4f0ff
 # Backend helpers
 # ============================================================================
 
+class BackendAuthenticationConfigurationError(RuntimeError):
+    """Safe operator-facing error for a missing Streamlit backend credential."""
+
+
 def run_async(coro):
     """Run an async HARIS operation from Streamlit's synchronous UI."""
     try:
@@ -737,12 +757,31 @@ async def backend_request(method: str, path: str, payload: Optional[Dict[str, An
     """Use Render as authority when the console is deployed separately."""
     if not settings.haris_backend_url:
         return None
+    if not settings.haris_backend_api_token:
+        raise BackendAuthenticationConfigurationError(
+            "HARIS backend authentication is not configured."
+        )
     import httpx
     base = settings.haris_backend_url.rstrip("/")
+    headers = {
+        "Authorization": f"Bearer {settings.haris_backend_api_token.get_secret_value()}"
+    }
     async with httpx.AsyncClient(timeout=10.0) as http:
-        response = await http.request(method, f"{base}{path}", json=payload)
+        response = await http.request(method, f"{base}{path}", json=payload, headers=headers)
         response.raise_for_status()
         return response.json()
+
+
+def unavailable_backend_status(cached: Optional[Dict[str, Any]], reason: str) -> Dict[str, Any]:
+    """Mark cached backend authority stale without substituting local truth."""
+    result = dict(cached or {})
+    result.update({
+        "backend_connection_state": "UNAVAILABLE",
+        "backend_status_stale": True,
+        "haris_state": "NOT_READY",
+        "backend_error": reason,
+    })
+    return result
 
 
 def authoritative_supervisory_status() -> Optional[Dict[str, Any]]:
@@ -754,9 +793,18 @@ def authoritative_supervisory_status() -> Optional[Dict[str, Any]]:
         if payload:
             st.session_state.backend_supervisory_status = payload
             return payload
+    except BackendAuthenticationConfigurationError as exc:
+        st.session_state.backend_configuration_error = str(exc)
+        return unavailable_backend_status(
+            st.session_state.get("backend_supervisory_status"),
+            "BACKEND_AUTH_CONFIGURATION_MISSING",
+        )
     except Exception:
         # Never substitute Streamlit-local security state if Render is down.
-        return st.session_state.get("backend_supervisory_status")
+        return unavailable_backend_status(
+            st.session_state.get("backend_supervisory_status"),
+            "BACKEND_UNAVAILABLE",
+        )
     return st.session_state.get("backend_supervisory_status")
 
 
@@ -958,8 +1006,13 @@ def render_capability_matrix(result: Optional[Dict[str, Any]]) -> None:
     for index, (key, label) in enumerate(labels):
         item = report.get(key, {"status": "PRIVILEGED_ONLY", "reason": "Number Verification + SIM Swap; privileged field intervention only."})
         status = display.get(item.get("status"), str(item.get("status", "UNKNOWN")).replace("_", " "))
+        truth = item.get("truth_status")
+        provenance = item.get("provenance")
+        detail = item.get("reason") or "Capability configuration is available."
+        if truth:
+            detail = f"{truth} · {provenance or 'UNAVAILABLE'} · {detail}"
         with columns[index % 3]:
-            render_html(capability_card(label, status, item.get("reason"), icons[key]))
+            render_html(capability_card(label, status, detail, icons[key]))
 
 
 def render_environment(result: Optional[Dict[str, Any]]) -> None:
@@ -980,9 +1033,9 @@ def render_prediction(result: Optional[Dict[str, Any]]) -> None:
     a, b, c, d = st.columns(4)
     with a: render_html(operational_card("Predicted Risk", safe_upper(prediction.get("predicted_risk_level"), "N/A")))
     with b: render_html(operational_card("Forecast Horizon", f"{prediction.get('horizon_minutes', 'N/A')} min", "Forecast window"))
-    with c: render_html(operational_card("Confidence", authoritative_metric(prediction.get("confidence"), kind="confidence"), "Model confidence"))
-    with d: render_html(operational_card("Degradation Probability", authoritative_metric(prediction.get("degradation_probability"), kind="confidence"), "Forecast probability"))
-    st.caption("Top factors: " + "; ".join(prediction.get("contributing_factors", [])))
+    with c: render_html(operational_card("Confidence", authoritative_metric(prediction.get("confidence"), kind="confidence"), "HARIS MODEL CONFIDENCE"))
+    with d: render_html(operational_card("Degradation Probability", authoritative_metric(prediction.get("degradation_probability"), kind="confidence"), "HARIS-DERIVED forecast probability"))
+    st.caption("HARIS DERIVED · " + str(prediction.get("model_type") or "categorical model") + " · inputs=" + str(prediction.get("input_window") or "N/A") + " · " + "; ".join(prediction.get("contributing_factors", [])))
 
     incident = (result or {}).get("incident", {})
     affected_cells = incident.get("affected_cells", [])
@@ -1045,7 +1098,7 @@ def render_prediction(result: Optional[Dict[str, Any]]) -> None:
 # ============================================================================
 
 def topology_svg(
-    data: Dict[str, Dict[str, float]],
+    data: Dict[str, Dict[str, Any]],
     active: bool,
 ) -> str:
     positions = {
@@ -1078,22 +1131,9 @@ def topology_svg(
         x1, y1 = positions[source]
         x2, y2 = positions[target]
 
-        values = [
-            data.get(source, {}).get("congestion_pct", math.nan),
-            data.get(target, {}).get("congestion_pct", math.nan),
-        ]
-
-        observed_congestion = [value for value in values if math.isfinite(value)]
-        max_congestion = max(observed_congestion) if observed_congestion else math.nan
-
-        if not math.isfinite(max_congestion):
-            color = "#7890aa"
-        elif max_congestion >= 70:
-            color = "#ff4d5f"
-        elif max_congestion >= 45:
-            color = "#ffc857"
-        else:
-            color = "#31d7ff"
+        levels = [data.get(source, {}).get("nokia_congestion") or data.get(source, {}).get("congestion_level"), data.get(target, {}).get("nokia_congestion") or data.get(target, {}).get("congestion_level")]
+        level = max((item for item in levels if item in {"None", "Low", "Medium", "High"}), key=lambda item: {"None": 0, "Low": 1, "Medium": 2, "High": 3}[item], default=None)
+        color = {"High": "#ff4d5f", "Medium": "#ffc857", "Low": "#31d7ff", "None": "#42f59b"}.get(level, "#7890aa")
 
         link_parts.append(
             f"""
@@ -1118,10 +1158,10 @@ def topology_svg(
             fill = "#10273a"
             sub = "NETWORK CORE"
         else:
-            congestion = data.get(name, {}).get("congestion_pct", math.nan)
-            latency = data.get(name, {}).get("latency_ms", math.nan)
-
-            status, key = tower_state(congestion, latency)
+            entity = data.get(name, {})
+            level = entity.get("nokia_congestion") or entity.get("congestion_level")
+            status = entity.get("haris_state") or ("INCIDENT_OPEN" if level == "High" else "WATCHING" if level == "Medium" else "STABLE" if level in {"Low", "None"} else "STALE")
+            key = {"High": "red", "Medium": "yellow", "Low": "green", "None": "green"}.get(level, "gray")
 
             colors = {
                 "red": ("#ff4d5f", "#35131a"),
@@ -1131,11 +1171,10 @@ def topology_svg(
             }
 
             stroke, fill = colors[key]
-            if not math.isfinite(congestion):
-                status = "KPI UNAVAILABLE"
-            sub = f"{status} · {congestion:.0f}%" if math.isfinite(congestion) else status
+            source_label = entity.get("source", "UNAVAILABLE").replace("_", " ")
+            sub = f"NOKIA: {str(level or 'UNAVAILABLE').upper()} / HARIS: {str(status).upper()} / {source_label}"
 
-        if name != "CORE" and status != "HEALTHY":
+        if name != "CORE" and status not in {"STABLE", "CORE"}:
             pulse = f"""
             <circle
                 cx="{x}"
@@ -1244,7 +1283,7 @@ def topology_svg(
             font-size:.60rem;
             margin:3px 0 5px;
         ">
-            Cyan = healthy · Amber = degraded · Red = critical · Gray = unavailable
+            Logical HARIS cell mapping · Nokia categorical source state + HARIS operational state
         </div>
 
         <svg
@@ -1305,10 +1344,24 @@ def topology_svg(
 # Network alerts + topology
 # ============================================================================
 
+def authoritative_network_entities(result: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """Prefer backend registry; local fallback remains explicitly cycle-bound."""
+    if settings.haris_backend_url:
+        try:
+            payload = run_async(backend_request("GET", "/api/nac/network-state")) or {}
+            entities = safe_mapping(payload).get("entities")
+            if isinstance(entities, dict):
+                return entities
+        except Exception:
+            return {}
+    rows = congestion_map(result)
+    source = "FIXTURE_SIMULATED" if settings.nac_mode == "fixture" else "UNAVAILABLE"
+    return {cell: {"entity_id": cell, "nokia_congestion": values.get("congestion_level"), "haris_state": "INCIDENT_OPEN" if values.get("congestion_level") == "High" else "WATCHING" if values.get("congestion_level") == "Medium" else "STABLE", "source": source, "source_type": "HARIS_CONFIGURED_LOGICAL_CELL"} for cell, values in rows.items()}
+
 def render_network_section(
     result: Optional[Dict[str, Any]],
 ) -> None:
-    data = congestion_map(result)
+    data = authoritative_network_entities(result)
 
     left, right = st.columns([.82, 2.18])
 
@@ -1321,19 +1374,18 @@ def render_network_section(
         rows = ""
 
         for cell_id, values in sorted(data.items()):
-            congestion = values["congestion_pct"]
-            level = values.get("congestion_level")
+            level = values.get("nokia_congestion") or values.get("congestion_level")
 
-            if congestion >= 70 or level in {"High", "Medium"}:
-                status_class = "badge-red" if congestion >= 75 else "badge-yellow"
-                status = "CRITICAL" if congestion >= 75 or level == "High" else "AT RISK"
-                evidence = f"{congestion:.0f}%" if math.isfinite(congestion) else f"{level} categorical"
+            if level in {"High", "Medium"}:
+                status_class = "badge-red" if level == "High" else "badge-yellow"
+                status = values.get("haris_state") or ("INCIDENT_OPEN" if level == "High" else "WATCHING")
+                evidence = f"NOKIA {str(level).upper()}"
 
                 rows += f"""
                 <div class="row">
                     <span><b>{cell_id}</b> · congestion</span>
                     <span class="badge {status_class}">
-                        {evidence} · {status}
+                    {evidence} · HARIS {status}
                     </span>
                 </div>
                 """
@@ -1364,7 +1416,9 @@ def render_network_section(
             tier = device.get("tier")
             battery = optional_float(device.get("battery_pct"))
 
-            if tier == 1 or battery < 25:
+            # Battery is HARIS fixture/policy metadata, not a Nokia live
+            # Device Status measurement.  Do not present it as live telemetry.
+            if tier == 1 or (settings.nac_mode == "fixture" and battery < 25):
                 if tier == 1:
                     label = "TIER-1"
                     cls = "badge-blue"
@@ -1854,13 +1908,8 @@ def render_controls() -> None:
                     st.rerun()
 
                 except Exception as exc:
-                    logger.exception(
-                        "HARIS cycle failed"
-                    )
-
-                    st.error(
-                        f"HARIS cycle failed: {exc}"
-                    )
+                    logger.warning("HARIS cycle failed; details suppressed")
+                    st.error("HARIS cycle failed. Review the authenticated backend status.")
 
     with b:
         if settings.nac_mode == "fixture" and st.button(
@@ -1889,9 +1938,9 @@ def render_controls() -> None:
                         st.session_state.last_result = run_async(get_system().run_field_intervention_demo())
                     st.session_state.last_elapsed = time.perf_counter() - start
                     st.rerun()
-                except Exception as exc:
-                    logger.exception("HARIS field intervention demo failed")
-                    st.error(f"Field intervention demo failed: {exc}")
+                except Exception:
+                    logger.warning("HARIS field intervention demo failed; details suppressed")
+                    st.error("Field intervention demo failed. Review the authenticated backend status.")
 
     with d:
         elapsed = st.session_state.get("last_elapsed")
@@ -1937,10 +1986,11 @@ def render_history(supervisory: Optional[Dict[str, Any]] = None) -> None:
         records = memory.recent_incidents()
         chain = memory.verify_audit_chain()
         persistence = history_storage_status(memory)
+    audit_available = bool(chain)
     audit_valid = bool(chain.get("valid"))
     legacy_chain = not audit_valid and str(chain.get("reason") or "").startswith("legacy_")
-    audit_state = "VALID" if audit_valid else ("LEGACY" if legacy_chain else "INVALID")
-    audit_class = "" if audit_valid else (" legacy" if legacy_chain else " invalid")
+    audit_state = "VALID" if audit_valid else ("LEGACY" if legacy_chain else ("INVALID" if audit_available else "UNAVAILABLE"))
+    audit_class = "" if audit_valid else (" legacy" if legacy_chain else (" invalid" if audit_available else ""))
     render_html(
         f'<div class="audit-chain-card{audit_class}">'
         f'<div class="audit-chain-symbol">{"&#10003;" if audit_valid else ("&#9888;" if legacy_chain else "&#215;")}</div>'
@@ -1953,14 +2003,40 @@ def render_history(supervisory: Optional[Dict[str, Any]] = None) -> None:
         st.caption("History storage: durable append-only backend repository.")
     else:
         st.caption("History storage: process-local memory (configure Supabase for restart-safe deployment history).")
+    durable_history = (supervisory or {}).get("incident_history") or []
+    timeline = (supervisory or {}).get("timeline") or []
+    if timeline:
+        st.markdown(
+            '<div class="section-title"><span class="section-mark">●</span><span>DURABLE OPERATOR TIMELINE</span></div>',
+            unsafe_allow_html=True,
+        )
+        st.dataframe(timeline, use_container_width=True, hide_index=True)
+        st.caption("Timeline authority: DERIVED FROM DURABLE incident, action, verification, and recovery records.")
+    if not records and durable_history:
+        records = durable_history
     if not records:
-        st.caption("No append-only audit history is available yet.")
+        st.caption("No durable incident or append-only audit history is available yet.")
         return
     def value(item: Any, name: str, default: Any = "N/A") -> Any:
         return item.get(name, default) if isinstance(item, dict) else getattr(item, name, default)
-    labels = [f"{value(item, 'created_at')} · {value(item, 'cycle_id') or value(item, 'incident_id')} · {value(item, 'outcome')}" for item in records]
+    if durable_history and records is durable_history:
+        labels = [
+            f"{safe_mapping(item.get('incident')).get('opened_at', 'N/A')} · "
+            f"{safe_mapping(item.get('incident')).get('incident_id', 'N/A')} · "
+            f"{item.get('final_truth', 'UNAVAILABLE')}"
+            for item in records
+        ]
+    else:
+        labels = [f"{value(item, 'created_at')} · {value(item, 'cycle_id') or value(item, 'incident_id')} · {value(item, 'outcome')}" for item in records]
     selected = records[labels.index(st.selectbox("Replay an append-only audit record", labels))]
-    st.caption(f"Mode: {value(selected, 'mode')} · Cells: {', '.join(value(selected, 'affected_cells', [])) or 'N/A'} · Outcome: {value(selected, 'outcome')}")
+    if durable_history and records is durable_history:
+        selected_incident = safe_mapping(selected.get("incident"))
+        st.caption(
+            f"Source: DURABLE REPOSITORY · State: {safe_text(selected_incident.get('state'), 'N/A')} · "
+            f"Outcome: {safe_text(selected.get('final_truth'), 'UNAVAILABLE')}"
+        )
+    else:
+        st.caption(f"Mode: {value(selected, 'mode')} · Cells: {', '.join(value(selected, 'affected_cells', [])) or 'N/A'} · Outcome: {value(selected, 'outcome')}")
     st.json(selected if isinstance(selected, dict) else get_system().memory.normalized_view(selected))
 
 
@@ -2061,6 +2137,8 @@ def render_overview(result: Optional[Dict[str, Any]], supervisory: Optional[Dict
 
 def render_network_intelligence(result: Optional[Dict[str, Any]]) -> None:
     render_section_header("NETWORK INTELLIGENCE", "Topology · environment · geofence policy · critical assets")
+    if settings.haris_backend_url:
+        render_observation_monitor()
     enabled = st.toggle("Geofencing Monitoring", value=get_system().geofencing_monitoring_enabled)
     get_system().set_geofencing_monitoring(enabled)
     st.caption("HARIS creates and cleans up geofence subscriptions only when policy and a playbook require it.")
@@ -2071,6 +2149,36 @@ def render_network_intelligence(result: Optional[Dict[str, Any]]) -> None:
     st.markdown('### GEOFENCE EVENTS')
     if geofence_events: st.dataframe(geofence_events, use_container_width=True, hide_index=True)
     else: st.caption("No Nokia geofence enter/exit event received.")
+
+
+@st.fragment(run_every=3)
+def render_observation_monitor() -> None:
+    """Refresh only backend-owned, read-only Nokia evidence for this section."""
+    try:
+        payload = run_async(backend_request("GET", "/api/nac/observations/latest")) or {}
+        status = safe_mapping(payload.get("status"))
+        observation = safe_mapping(payload.get("observation"))
+        state = safe_upper(status.get("connection_status"), "DISCONNECTED")
+        heading = "FIXTURE / SIMULATED MONITORING" if status.get("mode") == "fixture" else "NOKIA LIVE MONITORING"
+        last = status.get("last_success_at")
+        last_text = time.strftime("%H:%M:%S", time.localtime(last)) if isinstance(last, (int, float)) else "N/A"
+        next_at = status.get("next_poll_at")
+        next_text = time.strftime("%H:%M:%S", time.localtime(next_at)) if isinstance(next_at, (int, float)) else "N/A"
+        capability_text = " · ".join(
+            "{}: {} (last {}, next {})".format(
+                name.title(), safe_upper(safe_mapping(item).get("status"), "DISCONNECTED"),
+                time.strftime("%H:%M:%S", time.localtime(safe_mapping(item).get("last_success_at"))) if isinstance(safe_mapping(item).get("last_success_at"), (int, float)) else "N/A",
+                time.strftime("%H:%M:%S", time.localtime(safe_mapping(item).get("next_due_at"))) if isinstance(safe_mapping(item).get("next_due_at"), (int, float)) else "N/A",
+            ) for name, item in safe_mapping(status.get("capabilities")).items()
+        ) or "No capability evidence yet."
+        render_html(
+            f'<div class="cycle-panel"><div><div class="cycle-panel-label">{safe_text(heading)}</div>'
+            f'<div class="cycle-panel-value"><b>{safe_text(state)}</b> · Polling interval: '
+            f'{safe_text(status.get("interval_seconds"))}s · Last successful read: {safe_text(last_text)} · '
+            f'Next scheduled read: {safe_text(next_text)}<br>{safe_text(capability_text)}<br>Source: {safe_text(observation.get("source") or status.get("source"), "N/A")}</div></div></div>'
+        )
+    except Exception:
+        st.caption("Nokia live monitoring: DISCONNECTED — supervisory read unavailable.")
 
 
 def render_trusted_dispatch(result: Optional[Dict[str, Any]], supervisory: Optional[Dict[str, Any]] = None) -> None:
@@ -2167,6 +2275,8 @@ def render_console() -> None:
     supervisory = authoritative_supervisory_status()
     result = (supervisory or {}).get("cycle") or st.session_state.get("last_result")
     render_status_bar(result, supervisory)
+    if st.session_state.get("backend_configuration_error"):
+        st.error(st.session_state.backend_configuration_error)
     section = st.radio(
         "HARIS CONSOLE", ["OVERVIEW", "NETWORK INTELLIGENCE", "AUTONOMOUS OPERATIONS", "TRUSTED DISPATCH", "HISTORY & AUDIT"],
         horizontal=True, label_visibility="collapsed",

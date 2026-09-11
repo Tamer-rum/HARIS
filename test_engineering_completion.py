@@ -56,11 +56,13 @@ class EngineeringCompletionTests(unittest.TestCase):
         self.assertGreaterEqual(state["plan"]["confidence"], 0.89)
 
     def test_deployment_metadata_endpoints(self):
-        with TestClient(app) as client:
+        settings = AppSettings(nac_mode="fixture", haris_operational_api_token="test-operational-token")
+        headers = {"Authorization": "Bearer test-operational-token"}
+        with patch("nokia_clients.get_settings", return_value=settings), TestClient(app) as client:
             self.assertEqual(client.get("/api/nac/health").status_code, 200)
-            self.assertEqual(client.get("/api/nac/mode").status_code, 200)
-            self.assertEqual(client.get("/api/nac/capabilities").status_code, 200)
-            self.assertEqual(client.post("/api/nac/callbacks/nokia/geofence", json={"type": "org.camaraproject.geofencing-subscriptions.v0.area-entered"}).status_code, 200)
+            self.assertEqual(client.get("/api/nac/mode", headers=headers).status_code, 200)
+            self.assertEqual(client.get("/api/nac/capabilities", headers=headers).status_code, 200)
+            self.assertEqual(client.post("/api/nac/callbacks/nokia/geofence", json={"type": "org.camaraproject.geofencing-subscriptions.v0.area-entered"}).status_code, 503)
             self.assertEqual(client.post("/api/nac/callbacks/nokia/geofence", json={"type": "unexpected"}).status_code, 422)
 
     def test_custom_swagger_docs_are_presentational_and_openapi_stays_intact(self):
@@ -105,19 +107,10 @@ class EngineeringCompletionTests(unittest.TestCase):
         system.settings.public_dust_feed_url = "http://invalid"
         self.assertEqual(asyncio.run(system._dust_advisory(None))[1], "CACHED")
 
-    def test_environment_source_live(self):
+    def test_environment_source_external_http_is_disabled_in_test_runtime(self):
         settings = AppSettings(nac_mode="fixture", fixture_dir="fixtures", public_dust_feed_url="https://weather.example", gemini_api_key=None, groq_api_key=None)
         system = HarisAgentSystem(FixtureNokiaClient(settings), settings=settings)
-        class Response:
-            def raise_for_status(self): pass
-            def json(self): return {"dust_advisory": True}
-        class Client:
-            def __init__(self, **_): pass
-            async def __aenter__(self): return self
-            async def __aexit__(self, *_): pass
-            async def get(self, _): return Response()
-        with patch("httpx.AsyncClient", Client):
-            self.assertEqual(asyncio.run(system._dust_advisory(None))[1], "LIVE")
+        self.assertEqual(asyncio.run(system._dust_advisory(None))[1], "UNAVAILABLE")
 
     def test_old_audit_normalization_does_not_mutate_source(self):
         raw = {"incident_id": "old", "outcome": "verified", "affected_cells": ["T03"]}
@@ -268,7 +261,7 @@ class EngineeringCompletionTests(unittest.TestCase):
         router = ReasoningRouter(settings)
         incident = Incident(storm_advisory=True, peak_congestion_level="High", peak_confidence_level=90, affected_cells=["T03"], affected_devices=["ambulance-01"], severity="critical")
         class Good:
-            async def ainvoke(self, _): return type("R", (), {"content": json.dumps({"confidence": .9, "benefit": .8, "rationale": "mock"})})()
+            async def ainvoke(self, _): return type("R", (), {"content": json.dumps({"ranked_candidate_ids": [], "confidence_adjustment": .01, "expected_benefit": "mock", "rationale": "mock"})})()
         class Bad:
             async def ainvoke(self, _): raise TimeoutError()
         router.gemini = Good()
@@ -281,18 +274,25 @@ class EngineeringCompletionTests(unittest.TestCase):
         router.groq = Bad()
         self.assertTrue(asyncio.run(router.assess(incident, [], []))["fallback_used"])
 
-    def test_crewai_mocked_success_filters_unauthorized_and_failure_falls_back(self):
+    def test_crewai_mocked_success_validates_candidates_and_failure_falls_back(self):
         settings = AppSettings(nac_mode="fixture", fixture_dir="fixtures", gemini_api_key=None, groq_api_key=None)
         system = HarisAgentSystem(FixtureNokiaClient(settings), settings=settings)
-        system.crewai_agents = {"TRIAGE": object(), "WARDEN": object()}
+        system.crewai_agents = {role: object() for role in ("SENTINEL", "CARTOGRAPHER", "TRIAGE", "ACTUATOR", "WARDEN")}
         incident = Incident(storm_advisory=True, peak_congestion_level="High", peak_confidence_level=90, affected_cells=["T03"], affected_devices=["ambulance-01"], severity="critical")
         class FakeCrew:
             def __init__(self, **_): pass
-            def kickoff(self): return json.dumps({"recommended_action_order": ["qos", "unauthorized"], "confidence_modifier": .01})
+            def kickoff(self): return json.dumps({
+                "ranked_candidate_ids": ["candidate-0"],
+                "confidence_modifier": .01,
+                "expected_benefit": "protect tier-one traffic",
+                "rationale": "mock",
+                "specialist_notes": {role: "bounded mock note" for role in ("SENTINEL", "CARTOGRAPHER", "TRIAGE", "ACTUATOR", "WARDEN")},
+            })
         with patch("agents.Task", lambda **_: object()), patch("agents.Crew", FakeCrew):
             advisory = asyncio.run(system._crew_advisory(incident, [Action("qos", "ambulance-01", {}, "test")], []))
         self.assertTrue(advisory["used"])
-        self.assertEqual(advisory["advisory"]["recommended_action_order"], ["qos"])
+        self.assertEqual(advisory["advisory"]["ranked_candidate_ids"], ["candidate-0"])
+        self.assertEqual(advisory["roles"], ["SENTINEL", "CARTOGRAPHER", "TRIAGE", "ACTUATOR", "WARDEN"])
         class BrokenCrew:
             def __init__(self, **_): pass
             def kickoff(self): raise RuntimeError("mock failure")

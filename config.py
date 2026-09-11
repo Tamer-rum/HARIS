@@ -6,6 +6,7 @@ from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from runtime import external_access_policy
 
 
 class QualityLevel(str, Enum):
@@ -173,6 +174,25 @@ class GeofenceArea(BaseModel):
 class AppSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls,
+        init_settings,
+        env_settings,
+        dotenv_settings,
+        file_secret_settings,
+    ):
+        """Keep TEST settings deterministic while preserving explicit inputs."""
+        if external_access_policy().is_test:
+            return (init_settings,)
+        return (
+            init_settings,
+            env_settings,
+            dotenv_settings,
+            file_secret_settings,
+        )
+
     app_name: str = "HARIS"
     environment: str = "demo"
     log_level: str = "INFO"
@@ -182,9 +202,37 @@ class AppSettings(BaseSettings):
     # Public Render API base URL used by a separately deployed Streamlit
     # supervisor. It is configuration, not a credential.
     haris_backend_url: Optional[str] = None
+    # Separate server/operator and Streamlit-client credentials for the
+    # authenticated operational API boundary. Values are never serialized.
+    haris_operational_api_token: Optional[SecretStr] = None
+    haris_backend_api_token: Optional[SecretStr] = None
     cycle_seconds: int = 60
     enable_continuous_loop: bool = False
     enable_live_write_loop: bool = False
+    # Separate read-only Nokia evidence cadence. It never invokes LangGraph or
+    # any Nokia mutation and is disabled until deliberately enabled.
+    nokia_observation_enabled: bool = False
+    nokia_observation_interval_seconds: int = Field(default=3, ge=1, le=300)
+    # Conservative product defaults, not Nokia-proven rate-limit guidance.
+    nokia_congestion_interval_seconds: int = Field(default=10, ge=1, le=3600)
+    nokia_reachability_interval_seconds: int = Field(default=15, ge=1, le=3600)
+    nokia_location_interval_seconds: int = Field(default=60, ge=1, le=3600)
+    nokia_observation_timeout_seconds: int = Field(default=2, ge=1, le=30)
+    nokia_observation_history_limit: int = Field(default=120, ge=1, le=10_000)
+    nokia_observation_max_backoff_seconds: int = Field(default=30, ge=3, le=900)
+    # Event-driven incident correlation over read-only observation evidence.
+    # These are HARIS safety limits, not Nokia platform limits.
+    max_active_incidents: int = Field(default=2, ge=1, le=20)
+    max_parallel_executions: int = Field(default=1, ge=1, le=10)
+    # Durable provider-read continuation policy. These values govern safe
+    # reconciliation reads only; they never authorize mutation retries.
+    durable_reconciliation_max_attempts: int = Field(default=4, ge=1, le=20)
+    durable_reconciliation_base_backoff_seconds: int = Field(default=5, ge=1, le=3600)
+    durable_reconciliation_max_backoff_seconds: int = Field(default=30, ge=1, le=86400)
+    durable_reconciliation_deadline_seconds: int = Field(default=120, ge=5, le=86400)
+    durable_reconciliation_scan_seconds: int = Field(default=5, ge=1, le=300)
+    incident_recurrence_cooldown_seconds: int = Field(default=120, ge=0, le=86400)
+    incident_recovery_low_observations: int = Field(default=2, ge=1, le=20)
     geofencing_monitoring_enabled: bool = True
     # Energy Guard requires sustained evidence rather than one isolated High
     # observation. Production history uses HARIS observation timestamps.
@@ -221,16 +269,27 @@ class AppSettings(BaseSettings):
     # this at an access-controlled source of authorised engineer records.
     authorized_engineer_registry_path: str = "fixtures/authorized_engineers.json"
     trusted_dispatch_max_attempts: int = Field(default=3, ge=1, le=10)
+    # Event ingestion is server-side only.  No event endpoint accepts a
+    # provider notification unless this shared secret is configured.
+    nokia_event_webhook_secret: Optional[SecretStr] = None
 
     gemini_api_key: Optional[SecretStr] = None
     groq_api_key: Optional[SecretStr] = None
     gemini_model: str = "gemini-2.5-flash"
     groq_model: str = "llama-3.3-70b-versatile"
+    # Advisory inference is bounded so model-provider latency never holds the
+    # deterministic LangGraph control loop open indefinitely.
+    ai_provider_timeout_seconds: int = Field(default=8, ge=1, le=30)
+    crewai_timeout_seconds: int = Field(default=25, ge=1, le=55)
 
     # Durable audit persistence is backend-only. Configure these exclusively on
     # Render/FastAPI; Streamlit consumes the sanitized backend history API and
     # must never receive SUPABASE_KEY.
     haris_history_persistence_enabled: bool = False
+    # Domain persistence is selected explicitly; credentials alone never alter
+    # runtime authority. Postgres mode uses the server-only 6C.2 transport and
+    # fails closed whenever its explicit runtime/network gates are not open.
+    haris_persistence_mode: str = "memory"
     supabase_url: Optional[str] = None
     supabase_key: Optional[SecretStr] = None
     mem0_api_key: Optional[SecretStr] = None
@@ -295,4 +354,17 @@ class AppSettings(BaseSettings):
 
 @lru_cache(maxsize=1)
 def get_settings() -> AppSettings:
+    policy = external_access_policy()
+    if policy.is_test:
+        # Explicit constructor values beat .env.  A hostile local production
+        # environment can therefore never turn normal tests into live clients.
+        return AppSettings(
+            nac_mode="fixture", nokia_observation_enabled=False,
+            enable_continuous_loop=False, enable_live_write_loop=False,
+            nac_api_token=None, gemini_api_key=None, groq_api_key=None,
+            supabase_url=None, supabase_key=None, mem0_api_key=None,
+            haris_history_persistence_enabled=False, public_dust_feed_url=None,
+            haris_backend_url=None, haris_operational_api_token=None,
+            haris_backend_api_token=None, nokia_event_webhook_secret=None,
+        )
     return AppSettings()

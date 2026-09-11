@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, TypedDict
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from langgraph.graph import END, START, StateGraph
 
 from config import AppSettings, DevicePolicy, EnvironmentalSource, QualityLevel, get_settings
@@ -17,6 +17,7 @@ from memory import IncidentMemory, MemoryStore
 from nokia_clients import BaseNokiaClient, CongestionReading, DeviceStatus, evaluate_trusted_dispatch_phone, register_dispatch_resume_handler, register_dispatch_verification_failure_handler, start_number_verification_for_dispatch, verified_identities
 from playbooks import Action, PlaybookEngine
 from prediction import PredictionResult, RiskForecaster
+from runtime import external_access_policy
 
 logger = logging.getLogger("haris.agents")
 
@@ -59,15 +60,43 @@ class RemediationPlan(BaseModel):
     blast_radius: float = Field(ge=0, le=1)
     approval_required: bool
     rationale: str
+    # Triage records the deterministic device cohort. WARDEN re-validates it;
+    # an advisory model never supplies this list.
+    selected_device_ids: Optional[List[str]] = None
 
 
 class CrewAdvisory(BaseModel):
-    recommended_action_order: List[str] = Field(default_factory=list)
-    reasoning_summary: str = ""
-    key_risks: List[str] = Field(default_factory=list)
-    memory_observations: List[str] = Field(default_factory=list)
+    """Strictly bounded, non-executable collaboration output."""
+
+    model_config = ConfigDict(extra="forbid")
+    ranked_candidate_ids: List[str] = Field(default_factory=list)
     confidence_modifier: float = Field(default=0.0, ge=-0.05, le=0.05)
-    concerns: List[str] = Field(default_factory=list)
+    expected_benefit: str = ""
+    rationale: str = ""
+    specialist_notes: Dict[str, str] = Field(default_factory=dict)
+
+
+class PlannerAdvisory(BaseModel):
+    """Schema accepted from Gemini/Groq; it is advisory data, never a plan."""
+
+    model_config = ConfigDict(extra="forbid")
+    ranked_candidate_ids: List[str] = Field(default_factory=list)
+    confidence_adjustment: float = Field(default=0.0, ge=-0.05, le=0.05)
+    expected_benefit: str = ""
+    rationale: str = ""
+
+
+CREWAI_ROLE_NAMES = ("SENTINEL", "CARTOGRAPHER", "TRIAGE", "ACTUATOR", "WARDEN")
+
+
+def _candidate_ids(actions: List[Action]) -> List[str]:
+    """Stable identifiers for the deterministic candidates supplied to a model.
+
+    The identifier deliberately carries no mutable API parameters.  A model can
+    only rank one of these pre-existing candidates; it cannot construct a new
+    action or alter a candidate's target/profile.
+    """
+    return [f"candidate-{index}" for index, _ in enumerate(actions)]
 
 
 class HarisState(TypedDict, total=False):
@@ -102,6 +131,10 @@ class HarisState(TypedDict, total=False):
     prediction: Dict[str, Any]
     memory_context: List[Dict[str, Any]]
     crew_advisory: Dict[str, Any]
+    durable_planning_only: bool
+    durable_reasoning_context: Dict[str, Any]
+    durable_policy: Dict[str, Any]
+    decision_status: str
 
 def _safe_json(text: str) -> Dict[str, Any]:
     try:
@@ -125,7 +158,14 @@ class ReasoningRouter:
         self.settings = settings
         self.gemini = None
         self.groq = None
-        if LANGCHAIN_LLM_AVAILABLE:
+        self.availability_reason = "missing_model_credentials"
+        if not external_access_policy().allow_llm:
+            self.availability_reason = "runtime_policy_blocks_llm"
+            return
+        if not LANGCHAIN_LLM_AVAILABLE:
+            self.availability_reason = "langchain_provider_dependency_unavailable"
+            return
+        try:
             if settings.gemini_api_key:
                 self.gemini = ChatGoogleGenerativeAI(
                     model=settings.gemini_model,
@@ -140,33 +180,106 @@ class ReasoningRouter:
                     temperature=0,
                     max_tokens=800,
                 )
+        except Exception:
+            # Keep provider construction optional and avoid logging details
+            # which can include endpoint or credential context.
+            self.gemini = None
+            self.groq = None
+            self.availability_reason = "provider_initialization_failed"
+        else:
+            if self.gemini or self.groq:
+                self.availability_reason = "ready"
 
-    async def assess(self, incident: Incident, devices: List[DeviceStatus], actions: List[Action]) -> Dict[str, Any]:
+    def _deterministic_result(self, *, rationale: str, fallback_used: bool = True) -> Dict[str, Any]:
+        return {
+            "confidence": 0.86,
+            "benefit": 0.80,
+            "rationale": rationale,
+            "ranked_candidate_ids": [],
+            "confidence_adjustment": 0.0,
+            "expected_benefit": "Deterministic policy estimate retained.",
+            "ai_planner_used": False,
+            "model": None,
+            "fallback_used": fallback_used,
+        }
+
+    @staticmethod
+    def _validated_planner_result(
+        text: str,
+        candidate_ids: List[str],
+    ) -> Dict[str, Any]:
+        parsed = _safe_json(text)
+        if not parsed:
+            raise ValueError("planner did not return a JSON object")
+        advisory = PlannerAdvisory(**parsed)
+        allowed = set(candidate_ids)
+        ranked = advisory.ranked_candidate_ids
+        if len(ranked) != len(set(ranked)):
+            raise ValueError("planner returned duplicate candidate identifiers")
+        if any(candidate_id not in allowed for candidate_id in ranked):
+            raise ValueError("planner returned an unknown candidate identifier")
+        return {
+            "confidence": max(0.0, min(1.0, 0.86 + advisory.confidence_adjustment)),
+            "benefit": 0.80,
+            "rationale": advisory.rationale or "Bounded model advisory accepted.",
+            "ranked_candidate_ids": ranked,
+            "confidence_adjustment": advisory.confidence_adjustment,
+            "expected_benefit": advisory.expected_benefit,
+        }
+
+    async def assess(
+        self,
+        incident: Incident,
+        devices: List[DeviceStatus],
+        actions: List[Action],
+        candidate_ids: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        candidate_ids = candidate_ids or _candidate_ids(actions)
         payload = {
             "incident": incident.model_dump(),
             "devices": [d.model_dump() for d in devices],
-            "actions": [a.__dict__ for a in actions],
-            "instruction": "Return compact JSON with confidence 0..1, benefit 0..1, rationale. Do not propose actions not present in the input.",
+            "candidates": [
+                {"candidate_id": candidate_id, "kind": action.kind, "device_id": action.device_id}
+                for candidate_id, action in zip(candidate_ids, actions)
+            ],
+            "instruction": (
+                "Return JSON only matching PlannerAdvisory: ranked_candidate_ids, "
+                "confidence_adjustment (-0.05..0.05), expected_benefit, rationale. "
+                "Only rank supplied candidate IDs. Do not propose actions, parameters, "
+                "identities, cells, slices, or KPI values."
+            ),
         }
         prompt = json.dumps(payload, default=str)
-        model = self.gemini or self.groq
-        if model is None:
-            return {"confidence": 0.86, "benefit": 0.80, "rationale": "Deterministic policy evidence is sufficient; no hosted model key configured.", "ai_planner_used": False, "model": None, "fallback_used": True}
-        try:
-            response = await model.ainvoke(prompt)
-            text = response.content if hasattr(response, "content") else str(response)
-            parsed = _safe_json(text)
-            return {
-                "confidence": max(0.0, min(1.0, float(parsed.get("confidence", 0.86)))),
-                "benefit": max(0.0, min(1.0, float(parsed.get("benefit", 0.80)))),
-                "rationale": str(parsed.get("rationale", "Model advisory accepted within deterministic policy bounds.")),
-                "ai_planner_used": True,
-                "model": self.settings.gemini_model if self.gemini else self.settings.groq_model,
-                "fallback_used": False,
-            }
-        except Exception as exc:
-            logger.warning("LLM advisory failed; deterministic policy remains authoritative: %s", exc)
-            return {"confidence": 0.80, "benefit": 0.75, "rationale": "Hosted model unavailable; deterministic quality policy used.", "ai_planner_used": False, "model": self.settings.gemini_model if self.gemini else self.settings.groq_model, "fallback_used": True}
+        providers = [
+            ("gemini", self.settings.gemini_model, self.gemini),
+            ("groq", self.settings.groq_model, self.groq),
+        ]
+        attempted_primary = False
+        for provider_name, model_name, model in providers:
+            if model is None:
+                continue
+            attempted_primary = attempted_primary or provider_name == "gemini"
+            try:
+                response = await asyncio.wait_for(
+                    model.ainvoke(prompt), timeout=self.settings.ai_provider_timeout_seconds
+                )
+                text = response.content if hasattr(response, "content") else str(response)
+                result = self._validated_planner_result(text, candidate_ids)
+                result.update({
+                    "ai_planner_used": True,
+                    "model": model_name,
+                    # Groq succeeding after an attempted Gemini is a truthful fallback.
+                    "fallback_used": provider_name != "gemini" and attempted_primary,
+                })
+                return result
+            except (asyncio.TimeoutError, ValidationError, ValueError, TypeError):
+                logger.warning("%s planner advisory unavailable or invalid; trying safe fallback", provider_name)
+            except Exception:
+                # Provider errors can contain request details; do not log them verbatim.
+                logger.warning("%s planner advisory failed; trying safe fallback", provider_name)
+        return self._deterministic_result(
+            rationale="Hosted model advisory unavailable or invalid; deterministic quality policy used."
+        )
 
 
 class ToolFactory:
@@ -232,9 +345,9 @@ if CREWAI_AVAILABLE:
     def build_crewai_tools(tool_factory: ToolFactory) -> List[Any]:
         tools = tool_factory.build()
         specs = [
-            ("congestion_insights", "CAMARA Congestion Insights: read live/predicted congestion per cell."),
-            ("device_status", "CAMARA Device Status: read reachability, roaming, battery and cell state."),
-            ("location_retrieval", "CAMARA Location Retrieval: locate registered critical assets."),
+            ("congestion_insights", "CAMARA Congestion Insights: read categorical provider congestion evidence; numeric fixture KPIs remain separate."),
+            ("device_status", "CAMARA Device Status: read provider reachability; roaming, battery, tier and cell are HARIS metadata."),
+            ("location_retrieval", "CAMARA Location Retrieval: retrieve locations for configured critical assets where provider evidence is available."),
             ("geofence_subscribe", "CAMARA Geofencing: create an event-driven storm impact subscription."),
             ("qos_request", "CAMARA Quality on Demand: request a bounded QoS profile for a device."),
             ("qos_release", "CAMARA Quality on Demand: release a QoS session after conditions normalize."),
@@ -262,7 +375,9 @@ class HarisAgentSystem:
         register_dispatch_verification_failure_handler(self._handle_number_verification_failure)
         self._cached_environment: Optional[bool] = None
         self._congestion_history: Dict[str, List[Dict[str, Any]]] = {}
+        self._observation_store: Optional[Any] = None
         self.crewai_agents: Dict[str, Any] = {}
+        self._crewai_init_reason = "missing_model_credentials"
         self._init_crewai_agents()
         self.graph = self._build_graph()
 
@@ -274,6 +389,10 @@ class HarisAgentSystem:
     def set_geofencing_monitoring(self, enabled: bool) -> None:
         """Set the policy only; it never creates/deletes a Nokia subscription."""
         self.settings.geofencing_monitoring_enabled = bool(enabled)
+
+    def set_observation_store(self, store: Any) -> None:
+        """Attach backend read-only evidence; it never grants action authority."""
+        self._observation_store = store
 
     @property
     def current_dispatch_status(self) -> Dict[str, Any]:
@@ -295,6 +414,7 @@ class HarisAgentSystem:
         incident_id = (state.get("incident") or {}).get("incident_id") or self.current_dispatch_status.get("incident_id")
         return {
             "cycle_id": state.get("cycle_id"), "final_status": state.get("final_status"),
+            "decision_status": state.get("decision_status"),
             "incident": state.get("incident", {}), "prediction": state.get("prediction", {}),
             # These are the structured authoritative facts needed by the
             # supervisory console; action/session internals remain excluded.
@@ -413,71 +533,131 @@ class HarisAgentSystem:
         await self.memory.remember_incident(record)
 
     def _init_crewai_agents(self) -> None:
+        if not external_access_policy().allow_llm:
+            self._crewai_init_reason = "runtime_policy_blocks_llm"
+            return
         if not CREWAI_AVAILABLE:
+            self._crewai_init_reason = "crewai_dependency_unavailable"
             logger.warning("CrewAI is not installed; deterministic role logic remains active")
             return
         gemini_key = self.settings.gemini_api_key.get_secret_value() if self.settings.gemini_api_key else None
         groq_key = self.settings.groq_api_key.get_secret_value() if self.settings.groq_api_key else None
         llm = None
-        if gemini_key:
-            llm = LLM(model=f"gemini/{self.settings.gemini_model}", api_key=gemini_key, temperature=0.0)
-        elif groq_key:
-            llm = LLM(model=f"groq/{self.settings.groq_model}", api_key=groq_key, temperature=0.0)
+        try:
+            if gemini_key:
+                llm = LLM(
+                    model=f"gemini/{self.settings.gemini_model}", api_key=gemini_key,
+                    temperature=0.0, max_tokens=300,
+                    timeout=self.settings.ai_provider_timeout_seconds,
+                )
+            elif groq_key:
+                llm = LLM(
+                    model=f"groq/{self.settings.groq_model}", api_key=groq_key,
+                    temperature=0.0, max_tokens=300,
+                    timeout=self.settings.ai_provider_timeout_seconds,
+                )
+        except Exception:
+            # Never let optional advisory construction prevent the LangGraph
+            # supervisor from starting or leak provider configuration details.
+            logger.warning("CrewAI advisory provider could not be initialized; deterministic role logic remains active")
+            self._crewai_init_reason = "provider_initialization_failed"
+            return
         if llm is None:
+            self._crewai_init_reason = "missing_model_credentials"
             return
         roles = {
             "SENTINEL": "Watcher: detect environmental/network degradation and raise typed incidents.",
             "CARTOGRAPHER": "Locator: resolve exposed critical devices and geofence state.",
             "TRIAGE": "Planner: rank devices, apply policy, estimate cost/benefit and confidence.",
-            "ACTUATOR": "Executor: perform only bounded approved network actions.",
+            "ACTUATOR": "Execution reviewer: assess only the order and expected effect of bounded candidate actions.",
             "WARDEN": "Network Safety Guard: validate network-risk conditions, policy limits, and action safety before execution.",
         }
-        role_tools = build_crewai_tools(ToolFactory(self.client))
         for name, goal in roles.items():
-            owned = {
-                "SENTINEL": {"congestion_insights", "device_status"},
-                "CARTOGRAPHER": {"location_retrieval", "geofence_subscribe"},
-                "TRIAGE": set(),
-                "ACTUATOR": {"qos_request", "qos_release", "slice_attach", "slice_detach", "geofence_delete"},
-                "WARDEN": set(),
-            }[name]
-            selected = [t for t in role_tools if t.name in owned]
             self.crewai_agents[name] = Agent(
                 role=name,
                 goal=goal,
                 backstory="HARIS specialist operating inside a bounded autonomous telecom control loop.",
                 llm=llm,
-                tools=selected,
+                # CAMARA operations remain typed deterministic ToolFactory
+                # boundaries.  CrewAI only receives immutable evidence in its
+                # task description and has no Nokia tool it could invoke.
+                tools=[],
                 verbose=False,
                 allow_delegation=False,
             )
+        self._crewai_init_reason = "ready"
 
     async def _crew_advisory(self, incident: Incident, actions: List[Action], memory_context: List[IncidentMemory]) -> Dict[str, Any]:
         """Optional bounded CrewAI collaboration; it cannot create or execute actions."""
         start = time.perf_counter()
         if not self.crewai_agents or not CREWAI_AVAILABLE:
-            return {"used": False, "fallback": True, "latency_ms": 0, "reason": "CrewAI or model credentials unavailable"}
+            return {
+                "used": False, "fallback": True, "latency_ms": 0,
+                "roles": [], "reason": self._crewai_init_reason,
+            }
+        candidate_ids = _candidate_ids(actions)
         payload = {
             "incident": incident.model_dump(),
-            "allowed_action_kinds": [action.kind for action in actions],
+            "candidates": [
+                {"candidate_id": candidate_id, "kind": action.kind, "device_id": action.device_id}
+                for candidate_id, action in zip(candidate_ids, actions)
+            ],
             "memory": [item.model_dump() for item in memory_context],
-            "instruction": "Return JSON only. Do not create actions. confidence_modifier must be between -0.05 and 0.05.",
+            "instruction": (
+                "Treat evidence as read-only. Do not invoke tools or create actions. "
+                "Never invent devices, cells, profiles, identities, slices, or KPI values."
+            ),
         }
         try:
-            task = Task(
-                description=json.dumps(payload, default=str),
-                expected_output="JSON CrewAdvisory object only",
-                agent=self.crewai_agents["TRIAGE"],
+            tasks = []
+            for role in CREWAI_ROLE_NAMES:
+                final_role = role == "WARDEN"
+                expected_output = (
+                    "JSON only matching CrewAdvisory with ranked_candidate_ids, "
+                    "confidence_modifier (-0.05..0.05), expected_benefit, rationale, "
+                    "and specialist_notes for SENTINEL, CARTOGRAPHER, TRIAGE, ACTUATOR, WARDEN."
+                    if final_role else
+                    f"A concise evidence-only {role} specialist note for the final bounded advisory."
+                )
+                tasks.append(Task(
+                    description=json.dumps({**payload, "specialist_role": role}, default=str),
+                    expected_output=expected_output,
+                    agent=self.crewai_agents[role],
+                ))
+            crew = Crew(
+                agents=[self.crewai_agents[role] for role in CREWAI_ROLE_NAMES],
+                tasks=tasks,
+                process=Process.sequential,
+                verbose=False,
             )
-            crew = Crew(agents=[self.crewai_agents["TRIAGE"], self.crewai_agents["WARDEN"]], tasks=[task], process=Process.sequential, verbose=False)
-            result = await asyncio.to_thread(crew.kickoff)
+            result = await asyncio.wait_for(
+                asyncio.to_thread(crew.kickoff), timeout=self.settings.crewai_timeout_seconds
+            )
             parsed = CrewAdvisory(**_safe_json(str(result)))
-            allowed = {action.kind for action in actions}
-            parsed.recommended_action_order = [kind for kind in parsed.recommended_action_order if kind in allowed]
-            return {"used": True, "fallback": False, "latency_ms": round((time.perf_counter() - start) * 1000, 1), "advisory": parsed.model_dump()}
-        except Exception as exc:
-            logger.warning("CrewAI advisory failed; deterministic triage retained: %s", exc)
-            return {"used": False, "fallback": True, "latency_ms": round((time.perf_counter() - start) * 1000, 1), "reason": "CrewAI advisory unavailable"}
+            allowed = set(candidate_ids)
+            if len(parsed.ranked_candidate_ids) != len(set(parsed.ranked_candidate_ids)):
+                raise ValueError("CrewAI returned duplicate candidate identifiers")
+            if any(candidate_id not in allowed for candidate_id in parsed.ranked_candidate_ids):
+                raise ValueError("CrewAI returned an unknown candidate identifier")
+            notes = {key.upper(): value for key, value in parsed.specialist_notes.items() if key.upper() in CREWAI_ROLE_NAMES}
+            if set(notes) != set(CREWAI_ROLE_NAMES):
+                raise ValueError("CrewAI response omitted a required specialist note")
+            parsed.specialist_notes = notes
+            return {
+                "used": True, "fallback": False,
+                "latency_ms": round((time.perf_counter() - start) * 1000, 1),
+                "roles": list(CREWAI_ROLE_NAMES), "advisory": parsed.model_dump(),
+            }
+        except (asyncio.TimeoutError, ValidationError, ValueError, TypeError):
+            logger.warning("CrewAI advisory unavailable or invalid; deterministic triage retained")
+        except Exception:
+            # Providers may include request context in errors; avoid emitting it.
+            logger.warning("CrewAI advisory failed; deterministic triage retained")
+        return {
+            "used": False, "fallback": True,
+            "latency_ms": round((time.perf_counter() - start) * 1000, 1),
+            "roles": [], "reason": "crew_execution_unavailable",
+        }
 
     def _verification_route(
         self,
@@ -614,6 +794,8 @@ class HarisAgentSystem:
         graph.add_node("sentinel", self._sentinel)
         graph.add_node("cartographer", self._cartographer)
         graph.add_node("triage", self._triage)
+        graph.add_node("actuator_plan", self._actuator_plan)
+        graph.add_node("deterministic_normalization", self._deterministic_normalization)
         graph.add_node("warden", self._warden)
         graph.add_node("actuator", self._actuator)
         graph.add_node("verify", self._verify)
@@ -628,13 +810,19 @@ class HarisAgentSystem:
             "cartographer",
             "triage",
         )
+        graph.add_edge("triage", "actuator_plan")
+        graph.add_edge("actuator_plan", "deterministic_normalization")
         graph.add_edge(
-            "triage",
+            "deterministic_normalization",
             "warden",
         )
-        graph.add_edge(
+        graph.add_conditional_edges(
             "warden",
-            "actuator",
+            self._post_warden_route,
+            {
+                "actuator": "actuator",
+                "planning_complete": END,
+            },
         )
         graph.add_edge(
             "actuator",
@@ -662,6 +850,10 @@ class HarisAgentSystem:
         )
         return graph.compile()
 
+    @staticmethod
+    def _post_warden_route(state: HarisState) -> str:
+        return "planning_complete" if state.get("durable_planning_only") else "actuator"
+
     def _trace(self, state: HarisState, message: str) -> None:
         state.setdefault("trace", []).append(f"{time.strftime('%H:%M:%S')} | {message}")
         stage = message.split(":", 1)[0].strip().upper()
@@ -677,6 +869,103 @@ class HarisAgentSystem:
             event_type = "TRUST_CHECK"
         state.setdefault("events", []).append({"timestamp": time.time(), "incident_id": state.get("incident", {}).get("incident_id"), "type": event_type, "agent": stage, "message": message, "status": "PENDING" if pending else "BLOCKED" if "blocked" in message or "rejected" in message else "OK", "metadata": {}})
 
+
+    async def _actuator_plan(self, state: HarisState) -> HarisState:
+        """Bounded feasibility review; it never invokes a provider.
+
+        The established execution graph continues into its normal ACTUATOR
+        after WARDEN.  Durable Phase 7B stops at WARDEN, so this explicit role
+        records candidate feasibility before deterministic normalization and
+        cannot create, execute, or mark a Nokia resource successful.
+        """
+        if not state.get("durable_planning_only"):
+            return state
+        actions = list((state.get("plan") or {}).get("actions") or [])
+        feasible = 0
+        for action in actions:
+            if not self.client.action_safety_error(
+                str(action.get("kind") or ""), dict(action.get("parameters") or {})
+            ):
+                feasible += 1
+        state["actuator_plan"] = {
+            "candidate_count": len(actions),
+            "adapter_feasible_count": feasible,
+            "provider_execution_permitted": False,
+        }
+        self._trace(
+            state,
+            "ACTUATOR_PLAN: reviewed deterministic candidate feasibility; provider execution prohibited",
+        )
+        return state
+
+
+    async def _deterministic_normalization(self, state: HarisState) -> HarisState:
+        """Normalize only HARIS-produced candidates before WARDEN.
+
+        The normal execution graph retains its established behavior.  Durable
+        Phase 7B planning additionally removes candidates whose capability
+        truth cannot be proven from current durable/configured evidence.  An
+        advisory model never supplies an action, target, or parameter here.
+        """
+        if not state.get("durable_planning_only"):
+            return state
+        plan_data = state.get("plan") or {}
+        plan = RemediationPlan(**plan_data)
+        context = state.get("durable_reasoning_context") or {}
+        slice_status = str((context.get("capability_state") or {}).get("slice_status") or "UNAVAILABLE").upper()
+        durable_policy = state.get("durable_policy") or {}
+        mutation_scope_enforced = bool(
+            durable_policy.get("mutation_device_allowlist_enforced")
+        )
+        allowed_mutation_devices = {
+            str(device_id)
+            for device_id in durable_policy.get("allowed_mutation_device_ids") or []
+        }
+        normalized: List[Action] = []
+        rejected: List[Dict[str, str]] = []
+        for index, action in enumerate(plan.actions):
+            candidate_id = f"candidate-{index}"
+            reason = self.client.action_safety_error(action.kind, action.parameters)
+            if mutation_scope_enforced and action.device_id not in allowed_mutation_devices:
+                reason = "candidate is outside the durable mutation scope"
+            if action.kind == "slice_attach" and slice_status != "OPERATING":
+                reason = "protected slice is not durably proven OPERATING"
+            if reason:
+                rejected.append({"candidate_id": candidate_id, "kind": action.kind, "reason": reason})
+                continue
+            normalized.append(action)
+
+        selected = []
+        for action in normalized:
+            if action.device_id not in selected:
+                selected.append(action.device_id)
+        cost = sum(
+            0.75 if action.parameters.get("profile") == "guaranteed" else 0.20
+            for action in normalized if action.kind == "qos"
+        )
+        device_count = len(state.get("devices") or [])
+        blast_radius = min(1.0, len(selected) / max(1, device_count))
+        approval = (
+            blast_radius > self.settings.guardrails.human_approval_blast_radius
+            or plan.confidence < self.settings.guardrails.minimum_confidence
+            or cost > self.settings.guardrails.qos_spend_ceiling_usd
+        )
+        state["plan"] = {
+            **plan.model_dump(),
+            "actions": [action.__dict__ for action in normalized],
+            "selected_device_ids": selected,
+            "expected_cost_usd": cost,
+            "blast_radius": blast_radius,
+            "approval_required": approval,
+            "candidate_ids": _candidate_ids(normalized),
+            "rejected_candidates": rejected,
+        }
+        self._trace(
+            state,
+            "DETERMINISTIC_NORMALIZATION: "
+            f"allowed={len(normalized)} rejected={len(rejected)}; provider execution prohibited",
+        )
+        return state
 
     async def _warden(self, state: HarisState) -> HarisState:
         """
@@ -732,10 +1021,22 @@ class HarisAgentSystem:
                     <= guardrails.qos_spend_ceiling_usd
                 ),
                 "actions_present": bool(plan.actions),
-                "action_count_within_limit": (
-                    len(plan.actions)
+                "unique_device_count_within_limit": (
+                    len({action.device_id for action in plan.actions})
                     <= guardrails.max_devices_reconfigured_per_cycle
                 ),
+                "actions_belong_to_selected_devices": (
+                    plan.selected_device_ids is None
+                    or all(action.device_id in set(plan.selected_device_ids) for action in plan.actions)
+                ),
+                "action_kinds_allowed": all(
+                    action.kind in {"qos", "slice_attach", "geofence"}
+                    for action in plan.actions
+                ),
+                "no_duplicate_equivalent_actions": len({
+                    (action.kind, action.device_id, json.dumps(action.parameters, sort_keys=True, default=str))
+                    for action in plan.actions
+                }) == len(plan.actions),
                 "action_safety_ok": (
                     not action_errors
                     and all(
@@ -758,6 +1059,30 @@ class HarisAgentSystem:
                 ),
             }
 
+            if state.get("durable_planning_only"):
+                durable_policy = state.get("durable_policy") or {}
+                checks.update({
+                    "durable_context_current": bool(durable_policy.get("incident_current")),
+                    "durable_cost_ok": (
+                        float(durable_policy.get("incident_cost_total_usd", 0.0))
+                        + plan.expected_cost_usd
+                        <= float(durable_policy.get("cost_ceiling_usd", guardrails.qos_spend_ceiling_usd))
+                    ),
+                    "resource_ownership_ok": not bool(durable_policy.get("resource_conflicts")),
+                    "mutation_scope_ok": (
+                        not bool(durable_policy.get("mutation_device_allowlist_enforced"))
+                        or all(
+                            action.device_id
+                            in {
+                                str(device_id)
+                                for device_id in durable_policy.get("allowed_mutation_device_ids") or []
+                            }
+                            for action in plan.actions
+                        )
+                    ),
+                    "provider_execution_prohibited": True,
+                })
+
             safe = all(checks.values())
 
             # Only a typed physical-intervention requirement enters this branch.
@@ -768,7 +1093,22 @@ class HarisAgentSystem:
                     state,
                     "FIELD_INTERVENTION_REQUIRED: simulated fixture site condition requires an authorized engineer; network-only remediation is insufficient",
                 )
-                trust = await self._evaluate_field_intervention(state)
+                # Durable planning consumes only server-authoritative trust
+                # evidence already supplied in the bounded context.  It never
+                # starts OAuth or calls SIM Swap while evaluating a plan.
+                if state.get("durable_planning_only"):
+                    trust = dict(
+                        (state.get("durable_reasoning_context") or {}).get("trusted_dispatch")
+                        or {
+                            "decision": "BLOCK",
+                            "status": "IDENTITY_VERIFICATION_REQUIRED",
+                            "number_verified": False,
+                            "recent_sim_swap": None,
+                            "reason": "Fresh server-authoritative trust evidence is unavailable.",
+                        }
+                    )
+                else:
+                    trust = await self._evaluate_field_intervention(state)
                 state["trusted_dispatch"] = trust
                 self._trace(state, f"TRUST_CHECK: decision={trust['decision']}; status={trust['status']}")
                 if trust["decision"] != "ALLOW":
@@ -777,7 +1117,7 @@ class HarisAgentSystem:
 
             pending_identity = (
                 state.get("trusted_dispatch", {}).get("status")
-                == "WAITING_FOR_IDENTITY_VERIFICATION"
+                in {"WAITING_FOR_IDENTITY_VERIFICATION", "IDENTITY_VERIFICATION_REQUIRED"}
             )
             dispatch_blocked = (
                 bool(state.get("field_intervention_required"))
@@ -792,9 +1132,12 @@ class HarisAgentSystem:
                 "confidence": plan.confidence,
                 "blast_radius": plan.blast_radius,
                 "expected_cost_usd": plan.expected_cost_usd,
+                "selected_device_ids": plan.selected_device_ids or sorted({action.device_id for action in plan.actions}),
                 "approval_required": plan.approval_required,
                 "action_errors": action_errors,
                 "capability_report": self.client.capability_report(),
+                "execution_authority": "PLAN_ONLY" if state.get("durable_planning_only") else "EXECUTION_GATE",
+                "provider_execution_permitted": False if state.get("durable_planning_only") else safe,
                 "reason": "network_action_safe" if safe else (
                     "identity_verification_pending" if pending_identity else
                     "trusted_dispatch_blocked" if dispatch_blocked else
@@ -820,16 +1163,14 @@ class HarisAgentSystem:
 
             return state
 
-        except Exception as exc:
-            logger.exception(
-                "WARDEN network safety validation failed"
-            )
+        except Exception:
+            logger.warning("WARDEN network safety validation failed; details suppressed")
 
             state["warden"] = {
                 "verified": False,
                 "required": True,
                 "reason": "network_safety_validation_error",
-                "error": str(exc),
+                "error": "network_safety_validation_error",
             }
 
             self._trace(
@@ -840,6 +1181,10 @@ class HarisAgentSystem:
             return state
     
     async def _dust_advisory(self, fallback: Optional[bool]) -> tuple[bool, str]:
+        if not external_access_policy().allow_external_http:
+            if self._cached_environment is not None:
+                return self._cached_environment, EnvironmentalSource.CACHED.value
+            return bool(fallback), EnvironmentalSource.FIXTURE.value if fallback is not None else EnvironmentalSource.UNAVAILABLE.value
         url = self.settings.public_dust_feed_url
         if not url:
             return bool(fallback), EnvironmentalSource.FIXTURE.value if fallback is not None else EnvironmentalSource.UNAVAILABLE.value
@@ -854,8 +1199,8 @@ class HarisAgentSystem:
                 self._cached_environment = value
                 return value, EnvironmentalSource.LIVE.value
             raise ValueError("Environmental feed must return an object")
-        except Exception as exc:
-            logger.warning("Dust advisory feed unavailable; using fallback state: %s", exc)
+        except Exception:
+            logger.warning("Dust advisory feed unavailable; provider details suppressed")
             if self._cached_environment is not None:
                 return self._cached_environment, EnvironmentalSource.CACHED.value
             return bool(fallback), EnvironmentalSource.FIXTURE.value if fallback is not None else EnvironmentalSource.UNAVAILABLE.value
@@ -870,6 +1215,39 @@ class HarisAgentSystem:
         latency, or prediction values.
         """
 
+        if state.get("durable_planning_only"):
+            context = state.get("durable_reasoning_context") or {}
+            state.update({
+                "dust_advisory": bool(context.get("dust_advisory", False)),
+                "environmental_source": str(context.get("environmental_source") or "UNAVAILABLE"),
+                "congestion": list(context.get("congestion") or []),
+                "devices": list(context.get("devices") or []),
+                "locations": list(context.get("locations") or []),
+                "incident": dict(context.get("agent_incident") or {}),
+                "prediction": dict(context.get("prediction") or {
+                    "predicted_risk_level": "UNAVAILABLE",
+                    "confidence": None,
+                    "degradation_probability": None,
+                    "input_provenance": "UNAVAILABLE",
+                }),
+                "congestion_observed_at": context.get("source_timestamp"),
+                "field_intervention_required": bool(context.get("field_intervention_required", False)),
+                "field_intervention_site": context.get("field_intervention_site"),
+                "field_intervention_skills": list(context.get("field_intervention_skills") or []),
+                "field_intervention_reason": context.get("field_intervention_reason"),
+                "field_intervention_evidence": dict(context.get("field_intervention_evidence") or {}),
+            })
+            if not state["incident"] or not state["congestion"]:
+                raise RuntimeError("durable reasoning context lacks actionable incident evidence")
+            self._trace(
+                state,
+                "SENTINEL: interpreted current durable evidence; "
+                f"provenance={context.get('provenance', 'UNAVAILABLE')}; "
+                f"unavailable_evidence={len(context.get('unavailable_evidence') or [])}; "
+                "no provider read performed",
+            )
+            return state
+
         self._trace(
             state,
             "SENTINEL: sensing Nokia congestion, device status, and dust advisory",
@@ -879,17 +1257,29 @@ class HarisAgentSystem:
             state.get("dust_advisory", True)
         )
 
-        # ---------------------------------------------------------
-        # 1. Read real Nokia/CAMARA congestion observations
-        # ---------------------------------------------------------
-        congestion = await self.client.congestion_insights()
+        # Prefer a fresh, backend-authoritative observation snapshot when the
+        # separate poller is enabled.  It is factual source data, never a
+        # synthetic telemetry stream.  Missing capability data remains absent
+        # and the regular safe client read supplies only what is unavailable.
+        snapshot = state.get("observation_snapshot") or (self._observation_store.latest_fresh() if self._observation_store else None)
+        if snapshot and isinstance(snapshot.get("congestion"), list):
+            congestion = [CongestionReading(**item) for item in snapshot["congestion"]]
+            scope = set(state.get("incident_scope_cells") or [])
+            if scope:
+                congestion = [item for item in congestion if item.cell_id in scope]
+            observed_at = float(snapshot["observed_at"])
+            self._trace(state, "SENTINEL: using fresh backend Nokia observation snapshot")
+        else:
+            congestion = await self.client.congestion_insights()
+            observed_at = time.time()
 
-        # ---------------------------------------------------------
-        # 2. Read device status from Nokia + HARIS device metadata
-        # ---------------------------------------------------------
-        devices = await self.client.device_status(
-            self.settings.registered_devices
-        )
+        if snapshot and isinstance(snapshot.get("devices"), list):
+            devices = [DeviceStatus(**item) for item in snapshot["devices"]]
+            scope = set(state.get("incident_scope_cells") or [])
+            if scope:
+                devices = [item for item in devices if item.cell_id in scope]
+        else:
+            devices = await self.client.device_status(self.settings.registered_devices)
 
         state["congestion"] = [
             x.model_dump()
@@ -897,7 +1287,6 @@ class HarisAgentSystem:
         ]
         # Factual HARIS observation history used for sustained-congestion
         # policy. It does not synthesize any Nokia KPI values.
-        observed_at = time.time()
         for reading in congestion:
             samples = self._congestion_history.setdefault(reading.cell_id, [])
             samples.append({"observed_at": observed_at, "congestion_level": reading.congestion_level})
@@ -910,6 +1299,9 @@ class HarisAgentSystem:
         ]
 
         prediction = self.forecaster.predict(congestion, state["dust_advisory"], state["environmental_source"])
+        prediction = prediction.model_copy(update={
+            "input_provenance": "FIXTURE_SIMULATED" if self.settings.nac_mode == "fixture" else "NOKIA_LIVE"
+        })
         state["prediction"] = prediction.model_dump()
 
         if not congestion:
@@ -997,6 +1389,7 @@ class HarisAgentSystem:
             if reading.congestion_pct is not None
         ]
         incident = Incident(
+            incident_id=state.get("incident_id") or f"inc-{uuid.uuid4().hex[:12]}",
             storm_advisory=state.get("dust_advisory", True),
             peak_congestion_level=peak_level,
             peak_confidence_level=peak_confidence,
@@ -1134,6 +1527,14 @@ class HarisAgentSystem:
             pending_dispatches.complete(next_pending.pending_id, "BLOCKED")
 
     async def _cartographer(self, state: HarisState) -> HarisState:
+        if state.get("durable_planning_only"):
+            locations = list((state.get("durable_reasoning_context") or {}).get("locations") or [])
+            state["locations"] = locations
+            self._trace(
+                state,
+                "CARTOGRAPHER: used bounded durable topology/location evidence; no provider read performed",
+            )
+            return state
         device_ids = state.get(
             "incident",
             {},
@@ -1182,6 +1583,11 @@ class HarisAgentSystem:
             observed_at=state.get("congestion_observed_at"),
         )
         all_actions: List[Action] = evaluation["actions"]
+        deterministic_candidate_ids = _candidate_ids(all_actions)
+        candidate_id_by_action = {
+            id(action): candidate_id
+            for candidate_id, action in zip(deterministic_candidate_ids, all_actions)
+        }
         state["active_playbook"] = {
             "name": ", ".join(evaluation["playbooks"]) or "None",
             "state": "ACTIVE" if all_actions else "IDLE",
@@ -1191,9 +1597,15 @@ class HarisAgentSystem:
             "latest_outcome": "proposed" if all_actions else "no_action_proposed",
         }
         self._trace(state, f"PLAYBOOK_TRIGGERED: {state['active_playbook']['name']}")
-        prior_incidents = await self.memory.search_incidents(
-            "sandstorm " + " ".join(incident.affected_cells), limit=3
-        )
+        if state.get("durable_planning_only"):
+            prior_incidents = [
+                IncidentMemory(**item)
+                for item in (state.get("durable_reasoning_context") or {}).get("prior_memory", [])[:3]
+            ]
+        else:
+            prior_incidents = await self.memory.search_incidents(
+                "sandstorm " + " ".join(incident.affected_cells), limit=3
+            )
         relevant_priors = [
             prior for prior in prior_incidents
             if set(prior.affected_cells) & set(incident.affected_cells)
@@ -1201,7 +1613,13 @@ class HarisAgentSystem:
         state["memory_context"] = [prior.model_dump() for prior in relevant_priors]
         crew = await self._crew_advisory(incident, all_actions, relevant_priors)
         state["crew_advisory"] = crew
-        self._trace(state, f"CREWAI_USED={str(crew['used']).lower()} CREWAI_AGENTS={len(self.crewai_agents)} CREWAI_FALLBACK={str(crew['fallback']).lower()} CREWAI_LATENCY_MS={crew['latency_ms']}")
+        self._trace(
+            state,
+            f"CREWAI_USED={str(crew['used']).lower()} CREWAI_AGENTS={len(crew.get('roles', []))} "
+            f"CREWAI_ROLES={','.join(crew.get('roles', [])) or 'none'} "
+            f"CREWAI_FALLBACK={str(crew['fallback']).lower()} CREWAI_LATENCY_MS={crew['latency_ms']} "
+            f"CREWAI_REASON={crew.get('reason', 'active')}",
+        )
 
         # ---------------------------------------------------------
         # Build lookup tables from current Nokia network evidence.
@@ -1243,6 +1661,10 @@ class HarisAgentSystem:
             device.device_id: device
             for device in devices
         }
+        tier1_devices_by_cell: Dict[str, int] = {}
+        for device in devices:
+            if device.tier == 1:
+                tier1_devices_by_cell[device.cell_id] = tier1_devices_by_cell.get(device.cell_id, 0) + 1
         
 
         def action_priority(action: Action) -> tuple:
@@ -1274,6 +1696,9 @@ class HarisAgentSystem:
             return (
                 (4 - device.tier) * 1000,
                 congestion_rank * 100,
+                # With equal Tier/congestion evidence, protect the corridor
+                # containing more exposed Tier-1 assets first.
+                tier1_devices_by_cell.get(device.cell_id, 0),
                 confidence,
             )
 
@@ -1284,12 +1709,28 @@ class HarisAgentSystem:
             key=action_priority,
             reverse=True,
         )
-        crew_order = crew.get("advisory", {}).get("recommended_action_order", [])
+        crew_order = crew.get("advisory", {}).get("ranked_candidate_ids", [])
         if crew_order:
-            ranked_actions.sort(key=lambda action: crew_order.index(action.kind) if action.kind in crew_order else len(crew_order))
+            crew_rank = {candidate_id: index for index, candidate_id in enumerate(crew_order)}
+            ranked_actions.sort(
+                key=lambda action: crew_rank.get(candidate_id_by_action[id(action)], len(crew_order))
+            )
 
-        # Enforce the configured autonomous action limit.
-        actions = ranked_actions[:max_devices]
+        # The guardrail is a UNIQUE DEVICE limit, not an action limit. Retain
+        # the bounded, de-duplicated action set for each selected device so a
+        # Tier-1 asset can receive QoD + slice + geofence in one cycle.
+        selected_device_ids: List[str] = []
+        actions: List[Action] = []
+        action_signatures = set()
+        for action in ranked_actions:
+            if action.device_id not in selected_device_ids:
+                if len(selected_device_ids) >= max_devices:
+                    continue
+                selected_device_ids.append(action.device_id)
+            signature = (action.kind, action.device_id, json.dumps(action.parameters, sort_keys=True, default=str))
+            if signature not in action_signatures:
+                action_signatures.add(signature)
+                actions.append(action)
 
         # ---------------------------------------------------------
         # 3. Calculate QoD cost.
@@ -1312,12 +1753,21 @@ class HarisAgentSystem:
             incident,
             devices,
             actions,
+            [candidate_id_by_action[id(action)] for action in actions],
         )
         self._trace(
             state,
             "AI_PLANNER_USED=" + str(advisory["ai_planner_used"]).lower() +
-            f" MODEL={advisory['model'] or 'deterministic'} FALLBACK_USED={str(advisory['fallback_used']).lower()}",
+            f" MODEL={advisory['model'] or 'deterministic'} FALLBACK_USED={str(advisory['fallback_used']).lower()} "
+            f"AI_PLANNER_REASON={self.reasoning.availability_reason if not advisory['ai_planner_used'] else 'active'}",
         )
+
+        planner_order = advisory.get("ranked_candidate_ids", [])
+        if planner_order:
+            planner_rank = {candidate_id: index for index, candidate_id in enumerate(planner_order)}
+            actions.sort(
+                key=lambda action: planner_rank.get(candidate_id_by_action[id(action)], len(planner_order))
+            )
 
         confidence = float(advisory["confidence"])
         crew_modifier = float(crew.get("advisory", {}).get("confidence_modifier", 0.0))
@@ -1343,15 +1793,10 @@ class HarisAgentSystem:
         #
         #    Storm exposure does not automatically equal blast radius.
         # ---------------------------------------------------------
-        modified_devices = {
-            action.device_id
-            for action in actions
-            if action.kind in {
-                "qos",
-                "slice_attach",
-                "slice_detach",
-            }
-        }
+        # The denominator is the currently observed registered fleet, not an
+        # action count. Geofencing is included because it changes protection
+        # state for the selected device.
+        modified_devices = set(selected_device_ids)
 
         blast_radius = min(
             1.0,
@@ -1400,15 +1845,22 @@ class HarisAgentSystem:
             blast_radius=blast_radius,
             approval_required=approval,
             rationale=advisory["rationale"],
+            selected_device_ids=selected_device_ids,
         )
 
         state["plan"] = plan.model_dump()
+        if state.get("durable_planning_only"):
+            state["plan"].update({
+                "candidate_ids": _candidate_ids(actions),
+                "advisory_only": True,
+                "provider_execution_permitted": False,
+            })
 
         self._trace(
             state,
             (
-                f"TRIAGE: {len(actions)} bounded actions, "
-                f"devices={len(modified_devices)}, "
+                f"TRIAGE: selected_unique_devices={len(selected_device_ids)}, "
+                f"bounded_actions={len(actions)}, affected_tier1={len([device_id for device_id in selected_device_ids if device_by_id.get(device_id) and device_by_id[device_id].tier == 1])}, "
                 f"confidence={confidence:.2f}, "
                 f"cost=${cost:.2f}, "
                 f"blast_radius={blast_radius:.2f}, "
@@ -1435,6 +1887,22 @@ class HarisAgentSystem:
             state["execution"] = {
                 "executed": False,
                 "reason": "live_read_only",
+                "actions": [],
+            }
+            return state
+
+        # Phase 7C is the sole live-write side-effect boundary.  The legacy
+        # in-process graph remains available for deterministic fixture/demo
+        # cycles, but it may never bypass durable ownership, READY -> SENT
+        # arbitration, reconciliation, or the explicit server-side gate.
+        if self.settings.nac_mode == "live_write":
+            self._trace(
+                state,
+                "ACTUATOR: live mutation deferred to the durable Phase 7C executor",
+            )
+            state["execution"] = {
+                "executed": False,
+                "reason": "durable_executor_required",
                 "actions": [],
             }
             return state
@@ -1498,6 +1966,7 @@ class HarisAgentSystem:
                             "device_id": action.device_id,
                             "profile": action.parameters["profile"],
                             "session_id": result.session_id,
+                            "success": True,
                         }
                     )
 
@@ -1526,6 +1995,7 @@ class HarisAgentSystem:
                             "device_id": action.device_id,
                             "slice_id": action.parameters["slice_id"],
                             "attached": result.attached,
+                            "success": bool(result.attached),
                         }
                     )
 
@@ -1553,6 +2023,7 @@ class HarisAgentSystem:
                             "device_id": action.device_id,
                             "polygon_id": action.parameters["polygon_id"],
                             "subscription_id": result.subscription_id,
+                            "success": bool(result.active),
                         }
                     )
 
@@ -1589,21 +2060,21 @@ class HarisAgentSystem:
 
             return state
 
-        except Exception as exc:
-            logger.exception("Actuator execution failed")
+        except Exception:
+            logger.warning("Actuator execution failed; provider details suppressed")
 
             state["execution"] = {
                 "executed": False,
                 "actions": executed_actions,
                 "reason": "execution_error",
-                "error": str(exc),
+                "error": "provider_operation_failed",
             }
 
             self._trace(
                 state,
                 (
                     f"ACTUATOR: execution failed after "
-                    f"{len(executed_actions)} actions: {exc}"
+                    f"{len(executed_actions)} actions; provider details suppressed"
                 ),
             )
 
@@ -2217,7 +2688,7 @@ class HarisAgentSystem:
                 if not success:
                     rollback_success = False
 
-            except Exception as exc:
+            except Exception:
                 rollback_success = False
 
                 rollback_results.append(
@@ -2226,12 +2697,12 @@ class HarisAgentSystem:
                         "device_id": device_id,
                         "operation": "rollback",
                         "success": False,
-                        "error": str(exc),
+                        "error": "rollback_operation_failed",
                     }
                 )
 
-                logger.exception(
-                    "Rollback operation failed: kind=%s device=%s",
+                logger.warning(
+                    "Rollback operation failed; kind=%s device=%s; provider details suppressed",
                     kind,
                     device_id,
                 )
@@ -2242,7 +2713,7 @@ class HarisAgentSystem:
                         f"ROLLBACK: FAILED "
                         f"kind={kind} "
                         f"device={device_id} "
-                        f"error={exc}"
+                        "error=rollback_operation_failed"
                     ),
                 )
 
@@ -2489,6 +2960,40 @@ class HarisAgentSystem:
             f"Executed: {action_text}." + simulated
         )
 
+    async def run_durable_reasoning(self, context: Dict[str, Any]) -> HarisState:
+        """Run the existing LangGraph through WARDEN in PLAN-only mode.
+
+        The caller owns durable reload and persistence.  This method performs
+        no Nokia mutation and deliberately does not update the public latest
+        cycle until the caller confirms the durable decision boundary.
+        """
+        initial: HarisState = {
+            "cycle_id": str(context.get("decision_id") or uuid.uuid4().hex[:10]),
+            "incident_id": str(context["incident_id"]),
+            "incident_scope_cells": list(context.get("affected_entities") or []),
+            "durable_planning_only": True,
+            "durable_reasoning_context": context,
+            "durable_policy": dict(context.get("durable_policy") or {}),
+            "trace": [],
+            "events": [],
+        }
+        result = await self.graph.ainvoke(initial)
+        result["execution"] = {
+            "executed": False,
+            "reason": "phase_7b_authorized_plan_only",
+            "actions": [],
+        }
+        result["decision_status"] = (
+            "AUTHORIZED_PLAN" if result.get("warden", {}).get("verified")
+            else "ESCALATED" if result.get("plan", {}).get("approval_required")
+            else "BLOCKED"
+        )
+        return result
+
+    def accept_durable_decision(self, state: HarisState) -> None:
+        """Refresh the disposable NOC view only after durable persistence."""
+        self._latest_cycle = state
+
     async def run_cycle(
         self,
         dust_advisory: bool = True,
@@ -2497,10 +3002,16 @@ class HarisAgentSystem:
         field_intervention_site: Optional[str] = None,
         field_intervention_skills: Optional[List[str]] = None,
         field_intervention_reason: Optional[str] = None,
+        incident_scope_cells: Optional[List[str]] = None,
+        incident_id: Optional[str] = None,
+        observation_snapshot: Optional[Dict[str, Any]] = None,
     ) -> HarisState:
        
         initial: HarisState = {
             "cycle_id": uuid.uuid4().hex[:10],
+            "incident_id": incident_id,
+            "incident_scope_cells": incident_scope_cells or [],
+            "observation_snapshot": observation_snapshot,
             "dust_advisory": dust_advisory,
             "trace": [],
             "events": [],

@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Protocol
 from pydantic import BaseModel, Field
 
 from config import AppSettings, DevicePolicy, get_settings
+from runtime import external_access_policy, record_provider_access
 
 logger = logging.getLogger("haris.memory")
 
@@ -70,6 +71,7 @@ class SupabaseHistoryRepository:
     def _get_client(self) -> Any:
         if self._client is None:
             from supabase import create_client
+            record_provider_access("supabase")
             self._client = create_client(self._url, self._key)
         return self._client
 
@@ -233,6 +235,10 @@ class MemoryStore:
         self._load_local_policies()
 
     def _make_history_repository(self) -> Optional[HistoryRepository]:
+        if external_access_policy().is_test:
+            # The standard suite never builds a remote Supabase adapter, even
+            # when a direct test fixture carries hostile live-looking values.
+            return None
         if not self.settings.has_durable_history:
             return None
         # Do not construct an SDK client yet: web-server startup stays local.

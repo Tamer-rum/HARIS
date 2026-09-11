@@ -7,6 +7,7 @@ converts Nokia categories into fabricated numeric KPIs.
 from __future__ import annotations
 
 from collections import defaultdict, deque
+import time
 from typing import Deque, Dict, Iterable, List
 
 from pydantic import BaseModel, Field
@@ -23,6 +24,9 @@ class PredictionResult(BaseModel):
     affected_cells: List[str]
     evidence_source: str
     model_type: str = "categorical risk forecasting model"
+    generated_at: float = Field(default_factory=time.time)
+    input_window: int = 0
+    input_provenance: str = "UNAVAILABLE"
 
 
 class RiskForecaster:
@@ -76,4 +80,6 @@ class RiskForecaster:
             contributing_factors=factors[:4],
             affected_cells=sorted(set(affected)),
             evidence_source=f"Nokia categorical congestion history + HARIS dust advisory ({environmental_source})",
+            input_window=evidence_count,
+            input_provenance="FIXTURE_SIMULATED" if environmental_source == "FIXTURE" else "NOKIA_LIVE" if environmental_source not in {"UNAVAILABLE", "FIXTURE"} else "UNAVAILABLE",
         )

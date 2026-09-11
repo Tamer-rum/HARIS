@@ -3,8 +3,10 @@ import asyncio
 import inspect
 import json
 import logging
+import os
 import random
 import secrets
+import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -12,18 +14,33 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Callable, Dict, Generic, List, Optional, TypeVar
 
-from fastapi import APIRouter, FastAPI, HTTPException
+from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.openapi.docs import get_swagger_ui_html
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from config import AppSettings, get_settings
+from runtime import ExternalProviderAccessBlocked, external_access_policy, record_provider_access
 from dispatch import PendingDispatch, frontend_consent_tokens, frontend_workflow_sessions, pending_dispatches
 from memory import MemoryStore
 from network_as_code.models import Device
+from api_security import (
+    OperationalAuthError, PROTECTED_ROUTE_CLASSES, RouteClass,
+    authenticate_bearer, authenticate_shared_secret, classify_route,
+    operational_rate_limiter, redact_json_bytes,
+)
+from runtime import RuntimeEnvironment, runtime_environment
 
 logger = logging.getLogger("haris.nokia")
 T = TypeVar("T")
+
+
+def _assert_external_test_call_allowed(settings: AppSettings) -> None:
+    """Single policy boundary for Nokia SDK operations."""
+    if not external_access_policy().allow_nokia_read:
+        raise ExternalProviderAccessBlocked(
+            "External Nokia calls are blocked during HARIS TEST runtime."
+        )
 
 
 class RetryPolicy(BaseModel):
@@ -61,8 +78,11 @@ class CongestionReading(BaseModel):
     cell_id: str
     congestion_level: str
     confidence_level: int = Field(ge=0, le=100)
-    interval_start: str
-    interval_stop: str
+    # Durable replay can have a trustworthy source timestamp without the
+    # provider's original interval bounds.  Missing interval evidence remains
+    # unavailable instead of being synthesized.
+    interval_start: Optional[str] = None
+    interval_stop: Optional[str] = None
     # HARIS keeps measured fixture KPIs alongside CAMARA's categorical
     # congestion evidence.  Live Nokia responses may omit these values.
     congestion_pct: Optional[float] = Field(default=None, ge=0, le=100)
@@ -74,7 +94,10 @@ class DeviceStatus(BaseModel):
     device_id: str
     reachable: bool
     roaming: bool = False
-    battery_pct: float = Field(ge=0, le=100)
+    # Nokia reachability is live evidence while battery is currently HARIS
+    # metadata.  Durable live reasoning must be able to preserve an unavailable
+    # battery value rather than manufacturing zero.
+    battery_pct: Optional[float] = Field(default=None, ge=0, le=100)
     tier: int = Field(ge=1, le=3)
     cell_id: str
 
@@ -134,6 +157,10 @@ class BaseNokiaClient(ABC):
             "geofencing": {"status": "SUPPORTED_AND_CONFIGURED", "reason": None},
             "qod": {"status": "SUPPORTED_AND_CONFIGURED", "reason": None},
             "slicing": {"status": "SUPPORTED_AND_CONFIGURED", "reason": None},
+            "trusted_dispatch": {
+                "status": "PRIVILEGED_ONLY",
+                "reason": "Number Verification + SIM Swap are server-authoritative signals used only for privileged field intervention.",
+            },
         }
 
     @abstractmethod
@@ -452,6 +479,40 @@ class FixtureNokiaClient(BaseNokiaClient):
     
     
     
+class _OfflineNokiaSdkClient:
+    """Shape-compatible SDK stand-in for offline mocked contract tests.
+
+    It has no HTTP transport. Any unmocked provider operation fails locally
+    before it can construct an SDK request or reach a socket.
+    """
+
+    def __init__(self) -> None:
+        from types import SimpleNamespace
+
+        def blocked(*_args: Any, **_kwargs: Any) -> Any:
+            raise ExternalProviderAccessBlocked(
+                "Nokia SDK use is blocked in HARIS TEST runtime."
+            )
+
+        self._api = SimpleNamespace(
+            congestion=SimpleNamespace(fetch_congestion=blocked),
+            location_retrieve=SimpleNamespace(get_location=blocked),
+            sim_swap=SimpleNamespace(verify_sim_swap=blocked),
+        )
+        self.devices = SimpleNamespace(
+            get=lambda phone_number, **_kwargs: Device(api=self._api, phone_number=phone_number)
+        )
+        self.geofencing = SimpleNamespace(subscribe=blocked, get=blocked)
+        self.sessions = SimpleNamespace(get=blocked)
+        self.slices = SimpleNamespace(get=blocked)
+        self.insights = SimpleNamespace(
+            api=SimpleNamespace(congestion=SimpleNamespace(fetch_congestion=blocked))
+        )
+        self.device_status = SimpleNamespace(
+            api=SimpleNamespace(reachability_status=SimpleNamespace(get_reachability=blocked))
+        )
+
+
 class LiveNokiaClient(BaseNokiaClient):
     """Live adapter for the installed Nokia Network as Code Python SDK.
 
@@ -466,15 +527,6 @@ class LiveNokiaClient(BaseNokiaClient):
         super().__init__(settings)
         if not settings.nac_api_token:
             raise RuntimeError("NAC_API_TOKEN is required for NAC_MODE=live")
-        try:
-            import network_as_code as nac
-        except ImportError as exc:
-            raise RuntimeError("Install the Nokia SDK with: pip install network-as-code") from exc
-        self._nac = nac
-        self.client = nac.NetworkAsCodeClient(
-            token=settings.nac_api_token.get_secret_value(),
-        )
-        
         self.device_phone_map = {
             "ambulance-01": "+999900000001",
             "scada-01": "+999900000002",
@@ -485,6 +537,21 @@ class LiveNokiaClient(BaseNokiaClient):
             "telemetry-01": "+999900000007",
             "dispatch-01": "+999900000008",
         }
+        if external_access_policy().is_test:
+            # Direct adapter contract tests may patch this object, but normal
+            # tests never instantiate NetworkAsCodeClient.
+            self._nac = None
+            self.client = _OfflineNokiaSdkClient()
+            return
+        try:
+            import network_as_code as nac
+        except ImportError as exc:
+            raise RuntimeError("Install the Nokia SDK with: pip install network-as-code") from exc
+        record_provider_access("nokia_sdk")
+        self._nac = nac
+        self.client = nac.NetworkAsCodeClient(
+            token=settings.nac_api_token.get_secret_value(),
+        )
 
     def _resolve_slice_id(self, policy_alias: str) -> Optional[str]:
         if policy_alias == "haris-emergency" and self.settings.nac_emergency_slice_id:
@@ -557,12 +624,18 @@ class LiveNokiaClient(BaseNokiaClient):
                 "NAC_QOD_SERVICE_IPV4 is also required before a session can be constructed."
             )
         return {
-            "congestion_insights": {"status": "READ_READY", "reason": None},
-            "device_status": {"status": "READ_READY", "reason": None},
-            "location": {"status": "READ_READY", "reason": None},
-            "geofencing": geofencing,
-            "qod": qod,
-            "slicing": slicing,
+            "congestion_insights": {"status": "READ_READY", "reason": None, "truth_status": "READ_VALIDATED / POLLING_APPROPRIATE", "provenance": "REAL_OR_UNAVAILABLE"},
+            "device_status": {"status": "READ_READY", "reason": None, "truth_status": "READ_VALIDATED / POLLING_APPROPRIATE", "provenance": "REAL_OR_UNAVAILABLE"},
+            "location": {"status": "READ_READY", "reason": None, "truth_status": "READ_VALIDATED / POLLING_APPROPRIATE", "provenance": "REAL_OR_UNAVAILABLE"},
+            "geofencing": {**geofencing, "truth_status": "FAIL_CLOSED_AUTH_UNPROVEN", "provenance": "UNAVAILABLE_UNTIL_AUTHENTICATED"},
+            "qod": {**qod, "truth_status": "REAL_PARTIAL", "provenance": "REAL_PROVIDER_LIFECYCLE; NETWORK_UNCHANGED"},
+            "slicing": {**slicing, "truth_status": "SANDBOX_LIMITED", "provenance": "REAL_AVAILABLE_NOT_OPERATING"},
+            "trusted_dispatch": {
+                "status": "PRIVILEGED_ONLY",
+                "reason": "Number Verification + SIM Swap are evaluated server-side and fail closed for privileged field intervention only.",
+                "truth_status": "REAL_VALIDATED / PRIVILEGED_ONLY",
+                "provenance": "REAL_OR_UNAVAILABLE",
+            },
         }
         
     def _resolve_namespace(self, *names: str) -> Any:
@@ -651,6 +724,7 @@ class LiveNokiaClient(BaseNokiaClient):
                 phone_number=phone_number,
             )
 
+            _assert_external_test_call_allowed(self.settings)
             data = await asyncio.to_thread(
                 self.client.insights.api.congestion.fetch_congestion,
                 device,
@@ -764,15 +838,40 @@ class LiveNokiaClient(BaseNokiaClient):
                 "phoneNumber": phone_number
             }
 
-            data = await asyncio.to_thread(
-                self.client.device_status.api.reachability_status.get_reachability,
-                nokia_device,
-            )
+            try:
+                _assert_external_test_call_allowed(self.settings)
+                data = await asyncio.to_thread(
+                    self.client.device_status.api.reachability_status.get_reachability,
+                    nokia_device,
+                )
+            except ExternalProviderAccessBlocked:
+                # Test/runtime isolation is an authority boundary, not an
+                # unavailable observation, and must remain visible upstream.
+                raise
+            except Exception:
+                # A fleet observation is allowed to be partial.  Never leak
+                # provider request details or convert an unavailable observer
+                # into a fabricated reachable/unreachable result.
+                logger.warning(
+                    "Nokia device status unavailable for configured logical device=%s",
+                    device_id,
+                )
+                continue
+
+            if (
+                not isinstance(data, dict)
+                or not isinstance(data.get("reachable"), bool)
+            ):
+                logger.warning(
+                    "Nokia device status response invalid for configured logical device=%s",
+                    device_id,
+                )
+                continue
 
             results.append(
                 DeviceStatus(
                     device_id=device_id,
-                    reachable=bool(data.get("reachable", False)),
+                    reachable=data["reachable"],
                     roaming=bool(haris_device.get("roaming", False)),
                     battery_pct=float(haris_device["battery_pct"]),
                     tier=int(haris_device["tier"]),
@@ -802,6 +901,7 @@ class LiveNokiaClient(BaseNokiaClient):
                 phone_number=phone_number,
             )
 
+            _assert_external_test_call_allowed(self.settings)
             data = await asyncio.to_thread(
                 location_api.get_location,
                 device,
@@ -957,13 +1057,66 @@ class LiveNokiaClient(BaseNokiaClient):
 
 def build_nokia_client(settings: Optional[AppSettings] = None) -> BaseNokiaClient:
     settings = settings or get_settings()
+    if external_access_policy().is_test:
+        # The normal application factory never constructs the SDK client in
+        # tests, even if a caller supplied hostile live-looking settings.
+        return FixtureNokiaClient(settings.model_copy(update={"nac_mode": "fixture", "nac_api_token": None}))
     if settings.is_live:
         return LiveNokiaClient(settings)
     return FixtureNokiaClient(settings)
 
 
-client = build_nokia_client()
+_api_client: Optional[BaseNokiaClient] = None
+
+
+def get_api_client() -> BaseNokiaClient:
+    """Build the router adapter only when an endpoint actually needs it.
+
+    Importing ``nokia_clients`` or ``run_api`` therefore never constructs a
+    NetworkAsCodeClient, regardless of deployment credentials.
+    """
+    global _api_client
+    if _api_client is None:
+        _api_client = build_nokia_client()
+    return _api_client
+
+
 router = APIRouter(prefix="/api/nac", tags=["Nokia Network as Code"])
+
+_observation_store_factory = None
+
+
+def register_observation_store_factory(factory) -> None:
+    """Inject backend-owned observation authority without importing run_api."""
+    global _observation_store_factory
+    _observation_store_factory = factory
+
+
+def _observation_store():
+    if _observation_store_factory is None:
+        raise HTTPException(status_code=503, detail="Observation authority is unavailable.")
+    return _observation_store_factory()
+
+
+@router.get("/observations/status")
+async def observation_status() -> Dict[str, Any]:
+    return _observation_store().status()
+
+
+@router.get("/observations/latest")
+async def observation_latest() -> Dict[str, Any]:
+    store = _observation_store()
+    return {
+        "observation": store.latest(),
+        "last_successful_observation": store.last_successful(),
+        "status": store.status(),
+    }
+
+
+@router.get("/observations/history")
+async def observation_history() -> Dict[str, Any]:
+    store = _observation_store()
+    return {"observations": store.history(), "status": store.status()}
 
 
 class PendingNumberVerification(BaseModel):
@@ -1036,6 +1189,7 @@ class WorkflowSessionRequest(BaseModel):
 dispatch_resume_handler: Optional[Callable[[PendingDispatch], Any]] = None
 dispatch_verification_failure_handler: Optional[Callable[[PendingDispatch], Any]] = None
 dispatch_system_factory: Optional[Callable[[], Any]] = None
+supervisory_status_factory: Optional[Callable[[Any], Dict[str, Any]]] = None
 
 def register_dispatch_resume_handler(handler: Callable[[PendingDispatch], Any]) -> None:
     """Install the backend-owned continuation handler; never client controlled."""
@@ -1050,6 +1204,12 @@ def register_dispatch_system_factory(factory: Callable[[], Any]) -> None:
     """Register a lazy backend-system factory without constructing it on import."""
     global dispatch_system_factory
     dispatch_system_factory = factory
+
+
+def register_supervisory_status_factory(factory: Callable[[Any], Dict[str, Any]]) -> None:
+    """Register the backend composition root's authoritative status view."""
+    global supervisory_status_factory
+    supervisory_status_factory = factory
 
 
 def _authoritative_haris_system() -> Any:
@@ -1106,31 +1266,34 @@ async def number_verification_start(request: NumberVerificationStart) -> Dict[st
 @router.get("/health")
 async def health() -> Dict[str, str]:
     """Unauthenticated deployment health check; does not call Nokia."""
-    return {"status": "ok", "service": "HARIS", "mode": client.settings.nac_mode}
+    settings = get_settings()
+    return {"status": "ok", "health_type": "LIVENESS", "service": "HARIS", "mode": settings.nac_mode}
 
 
 @router.get("/mode")
 async def mode() -> Dict[str, Any]:
+    settings = get_settings()
     return {
-        "mode": client.settings.nac_mode,
-        "label": client.settings.operating_mode_label,
-        "writes_enabled": client.settings.allows_network_writes,
+        "mode": settings.nac_mode,
+        "label": settings.operating_mode_label,
+        "writes_enabled": settings.allows_network_writes,
     }
 
 
 @router.get("/capabilities")
 async def capabilities() -> Dict[str, Any]:
+    client = get_api_client()
     return {"mode": client.settings.nac_mode, "capabilities": client.capability_report()}
 
 
 @router.get("/incidents")
 async def incidents() -> List[Dict[str, Any]]:
-    return [item.model_dump() for item in MemoryStore(client.settings).recent_incidents()]
+    return [item.model_dump() for item in MemoryStore(get_settings()).recent_incidents()]
 
 
 @router.get("/incidents/{cycle_id}")
 async def incident_replay(cycle_id: str) -> Dict[str, Any]:
-    item = MemoryStore(client.settings).get_incident(cycle_id)
+    item = MemoryStore(get_settings()).get_incident(cycle_id)
     if not item:
         raise HTTPException(status_code=404, detail="Incident record not found.")
     return item.model_dump()
@@ -1160,6 +1323,11 @@ async def authoritative_autonomous_run() -> Dict[str, Any]:
     decision, rather than a request parameter.
     """
     system = _authoritative_haris_system()
+    if system.settings.nac_mode != "fixture":
+        raise HTTPException(
+            status_code=403,
+            detail="Manual graph cycles are fixture-only; live incidents enter through the durable event runtime.",
+        )
     await system.run_cycle(dust_advisory=True)
     # A cycle is rendered by the separate Streamlit supervisor, so apply the
     # same defence-in-depth redaction used by the authoritative status view.
@@ -1170,6 +1338,8 @@ async def authoritative_autonomous_run() -> Dict[str, Any]:
 async def authoritative_autonomous_status() -> Dict[str, Any]:
     """Sanitized backend-owned supervisor state; never an OAuth handoff."""
     system = _authoritative_haris_system()
+    if supervisory_status_factory is not None:
+        return supervisory_status_factory(system)
     return system.current_supervisory_status
 
 
@@ -1206,16 +1376,25 @@ async def _wrap(fn: Callable[[], Any]) -> Any:
         latency = (time.perf_counter() - start) * 1000
         return data, latency
     except Exception as exc:
-        logger.exception("CAMARA operation failed")
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        # Provider/SDK exceptions can contain request URLs, resource identifiers,
+        # headers, or response bodies.  Keep the public and log surfaces fixed
+        # and symbolic; the durable execution path records its own sanitized
+        # stage/outcome evidence.
+        logger.warning("CAMARA operation failed; provider details suppressed")
+        raise HTTPException(status_code=502, detail="CAMARA operation failed.") from exc
 
 
 def _require_write_mode() -> None:
-    """Keep the API facade aligned with HARIS's central mode policy."""
-    if not client.settings.allows_network_writes:
+    """Keep legacy direct mutation routes fixture-only.
+
+    Real provider writes must enter through the durable action executor after
+    deterministic WARDEN authorization.  These compatibility routes remain
+    useful for the in-process simulator, where they cannot reach Nokia.
+    """
+    if get_api_client().settings.nac_mode != "fixture":
         raise HTTPException(
             status_code=403,
-            detail="Network writes are disabled in LIVE_READ_ONLY mode.",
+            detail="Direct provider mutations are disabled; use the durable WARDEN-authorized workflow.",
         )
 
 
@@ -1226,19 +1405,22 @@ class GeofenceCallback(BaseModel):
 
 @router.post("/callbacks/nokia/geofence")
 async def geofence_callback(event: GeofenceCallback) -> Dict[str, str]:
-    """Receive only known geofence events; never triggers network mutation."""
+    """Fail closed until Nokia geofence callback authentication is proven."""
     allowed = {
         "org.camaraproject.geofencing-subscriptions.v0.area-entered",
         "org.camaraproject.geofencing-subscriptions.v0.area-left",
     }
     if event.event_type not in allowed:
         raise HTTPException(status_code=422, detail="Unsupported geofence event type.")
-    logger.info("Received validated Nokia geofence event type=%s", event.event_type)
-    return {"status": "accepted"}
+    raise HTTPException(
+        status_code=503,
+        detail="Authenticated Nokia geofence callback provenance is unavailable.",
+    )
 
 
 @router.get("/congestion", response_model=ApiResponse[List[CongestionReading]])
 async def congestion(cell_ids: Optional[List[str]] = None):
+    client = get_api_client()
     data, latency = await _wrap(lambda: client.congestion_insights(cell_ids))
     return ApiResponse(data=data, source=client.name, latency_ms=latency)
 
@@ -1374,12 +1556,14 @@ async def trusted_dispatch(request: TrustedDispatchRequest) -> Dict[str, Any]:
 
 @router.post("/device-status", response_model=ApiResponse[List[DeviceStatus]])
 async def device_status(device_ids: List[str]):
+    client = get_api_client()
     data, latency = await _wrap(lambda: client.device_status(device_ids))
     return ApiResponse(data=data, source=client.name, latency_ms=latency)
 
 
 @router.post("/location", response_model=ApiResponse[List[Location]])
 async def location(device_ids: List[str]):
+    client = get_api_client()
     data, latency = await _wrap(lambda: client.location_retrieval(device_ids))
     return ApiResponse(data=data, source=client.name, latency_ms=latency)
 
@@ -1392,6 +1576,7 @@ class GeofenceRequest(BaseModel):
 @router.post("/geofence", response_model=ApiResponse[GeofenceSubscription])
 async def geofence(req: GeofenceRequest):
     _require_write_mode()
+    client = get_api_client()
     data, latency = await _wrap(lambda: client.create_geofence(req.device_id, req.polygon_id))
     return ApiResponse(data=data, source=client.name, latency_ms=latency)
 
@@ -1399,6 +1584,7 @@ async def geofence(req: GeofenceRequest):
 @router.delete("/geofence/{subscription_id}", response_model=ApiResponse[bool])
 async def geofence_delete(subscription_id: str):
     _require_write_mode()
+    client = get_api_client()
     data, latency = await _wrap(lambda: client.delete_geofence(subscription_id))
     return ApiResponse(data=data, source=client.name, latency_ms=latency)
 
@@ -1412,6 +1598,7 @@ class QosRequest(BaseModel):
 @router.post("/qos", response_model=ApiResponse[QosSession])
 async def qos(req: QosRequest):
     _require_write_mode()
+    client = get_api_client()
     data, latency = await _wrap(lambda: client.request_qos(req.device_id, req.profile, req.duration_seconds))
     return ApiResponse(data=data, source=client.name, latency_ms=latency)
 
@@ -1419,6 +1606,7 @@ async def qos(req: QosRequest):
 @router.delete("/qos/{session_id}", response_model=ApiResponse[bool])
 async def qos_delete(session_id: str):
     _require_write_mode()
+    client = get_api_client()
     data, latency = await _wrap(lambda: client.release_qos(session_id))
     return ApiResponse(data=data, source=client.name, latency_ms=latency)
 
@@ -1431,6 +1619,7 @@ class SliceRequest(BaseModel):
 @router.post("/slice/attach", response_model=ApiResponse[SliceAttachment])
 async def slice_attach(req: SliceRequest):
     _require_write_mode()
+    client = get_api_client()
     data, latency = await _wrap(lambda: client.attach_slice(req.device_id, req.slice_id))
     return ApiResponse(data=data, source=client.name, latency_ms=latency)
 
@@ -1438,6 +1627,7 @@ async def slice_attach(req: SliceRequest):
 @router.post("/slice/detach", response_model=ApiResponse[SliceAttachment])
 async def slice_detach(req: SliceRequest):
     _require_write_mode()
+    client = get_api_client()
     data, latency = await _wrap(lambda: client.detach_slice(req.device_id, req.slice_id))
     return ApiResponse(data=data, source=client.name, latency_ms=latency)
 
@@ -1460,6 +1650,58 @@ body { background:#060a10 !important; color:#eaf4ff !important; font-family:Inte
 def create_fastapi_app() -> FastAPI:
     api = FastAPI(title="HARIS Network Control API", version="1.0.0", docs_url=None)
     api.include_router(router)
+
+    @api.middleware("http")
+    async def operational_security_boundary(request: Request, call_next):
+        route_class = classify_route(request.method, request.url.path)
+        if route_class is RouteClass.DOCUMENTATION and runtime_environment() is RuntimeEnvironment.PRODUCTION:
+            return JSONResponse(status_code=404, content={"detail": "Not found."})
+
+        principal_digest = None
+        try:
+            if route_class in PROTECTED_ROUTE_CLASSES:
+                principal_digest = authenticate_bearer(
+                    get_settings().haris_operational_api_token,
+                    request.headers.get("authorization"),
+                )
+            elif request.method.upper() == "POST" and request.url.path == "/api/events/nokia/congestion":
+                principal_digest = authenticate_shared_secret(
+                    get_settings().nokia_event_webhook_secret,
+                    request.headers.get("x-haris-event-secret"),
+                )
+        except OperationalAuthError as exc:
+            headers = {"WWW-Authenticate": "Bearer"} if exc.status_code == 401 and route_class in PROTECTED_ROUTE_CLASSES else None
+            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail}, headers=headers)
+
+        if principal_digest is not None:
+            client_address = request.client.host if request.client else "unknown"
+            if not operational_rate_limiter.allow(principal_digest, route_class, client_address):
+                return JSONResponse(status_code=429, content={"detail": "Operational API rate limit exceeded."})
+
+        response = await call_next(request)
+        if route_class in PROTECTED_ROUTE_CLASSES and response.headers.get("content-type", "").startswith("application/json"):
+            body = b"".join([chunk async for chunk in response.body_iterator])
+            safe_body = redact_json_bytes(
+                body,
+                allow_authorization_url=request.url.path in {
+                    "/api/nac/autonomous/consent-action",
+                    "/api/nac/auth/number-verification/start",
+                },
+                allow_handoff_tokens=request.url.path in {
+                    "/api/nac/autonomous/field-intervention-demo",
+                    "/api/nac/autonomous/consent-action-token",
+                },
+            )
+            headers = dict(response.headers)
+            headers.pop("content-length", None)
+            return Response(
+                content=safe_body,
+                status_code=response.status_code,
+                headers=headers,
+                media_type="application/json",
+                background=response.background,
+            )
+        return response
 
     @api.get("/docs", include_in_schema=False)
     async def haris_swagger_docs() -> HTMLResponse:

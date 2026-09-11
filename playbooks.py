@@ -200,6 +200,7 @@ class PlaybookEngine:
             if (
                 d.tier == 3
                 and d.cell_id in hot_cells
+                and d.battery_pct is not None
                 and d.battery_pct < self.settings.energy_guard_battery_threshold_pct
                 and sustained(d.cell_id)
             )

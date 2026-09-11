@@ -8,6 +8,8 @@ from unittest.mock import patch
 from agents import HarisAgentSystem, RemediationPlan
 from config import AppSettings, GeofenceArea
 from memory import MemoryStore
+from fastapi import HTTPException
+import nokia_clients
 from nokia_clients import FixtureNokiaClient, LiveNokiaClient
 from playbooks import Action, PlaybookEngine
 
@@ -68,7 +70,8 @@ class HarisCoreTests(unittest.TestCase):
         settings = self.settings()
         result = asyncio.run(HarisAgentSystem(FixtureNokiaClient(settings), settings=settings).run_cycle(True))
         self.assertEqual(result["incident"]["affected_cells"], ["T02", "T03", "T05"])
-        self.assertLessEqual(len(result["plan"]["actions"]), settings.guardrails.max_devices_reconfigured_per_cycle)
+        self.assertLessEqual(len(set(result["plan"]["selected_device_ids"])), settings.guardrails.max_devices_reconfigured_per_cycle)
+        self.assertGreater(len(result["plan"]["actions"]), settings.guardrails.max_devices_reconfigured_per_cycle)
         self.assertTrue(result["warden"]["verified"])
         self.assertTrue(result["execution"]["executed"])
         self.assertTrue(result["verification"]["verified"])
@@ -77,6 +80,43 @@ class HarisCoreTests(unittest.TestCase):
         self.assertEqual(result["active_playbook"]["state"], "MITIGATED")
         self.assertEqual(result["active_playbook"]["current_stage"], "LEARN")
         self.assertEqual(result["active_playbook"]["latest_outcome"], "mitigated")
+
+    def test_device_limit_selects_two_tier_one_devices_and_retains_protection_actions(self):
+        settings = self.settings()
+        result = asyncio.run(HarisAgentSystem(FixtureNokiaClient(settings), settings=settings).run_cycle(True))
+        selected = result["plan"]["selected_device_ids"]
+        self.assertEqual(selected, ["ambulance-01", "scada-01"])
+        self.assertEqual(len(selected), 2)
+        self.assertGreaterEqual(len(result["plan"]["actions"]), 5)
+        for device_id in selected:
+            kinds = {item["kind"] for item in result["execution"]["actions"] if item["device_id"] == device_id and item["success"]}
+            self.assertTrue({"qos", "slice_attach", "geofence"}.issubset(kinds))
+        self.assertEqual(result["plan"]["blast_radius"], .25)
+
+    def test_warden_counts_unique_devices_not_actions_and_rejects_duplicates_or_third_device(self):
+        settings = self.settings()
+        system = HarisAgentSystem(FixtureNokiaClient(settings), settings=settings)
+        actions = [
+            Action("qos", "ambulance-01", {"profile": "guaranteed", "duration_seconds": 300}, "test"),
+            Action("slice_attach", "ambulance-01", {"slice_id": "haris-emergency"}, "test"),
+            Action("geofence", "ambulance-01", {"polygon_id": "storm-impact"}, "test"),
+            Action("qos", "scada-01", {"profile": "guaranteed", "duration_seconds": 300}, "test"),
+            Action("slice_attach", "scada-01", {"slice_id": "haris-emergency"}, "test"),
+        ]
+        plan = RemediationPlan(
+            incident_id="two-devices", actions=actions, confidence=.9,
+            expected_cost_usd=1.5, expected_benefit=.8, blast_radius=.25,
+            approval_required=False, rationale="test",
+            selected_device_ids=["ambulance-01", "scada-01"],
+        )
+        approved = asyncio.run(system._warden({"plan": plan.model_dump(), "trace": []}))
+        self.assertTrue(approved["warden"]["verified"])
+        third = plan.model_copy(update={"actions": actions + [Action("qos", "pipeline-01", {"profile": "guaranteed", "duration_seconds": 300}, "test")], "selected_device_ids": ["ambulance-01", "scada-01", "pipeline-01"]})
+        rejected = asyncio.run(system._warden({"plan": third.model_dump(), "trace": []}))
+        self.assertFalse(rejected["warden"]["safety_checks"]["unique_device_count_within_limit"])
+        duplicate = plan.model_copy(update={"actions": actions + [actions[0]]})
+        rejected_duplicate = asyncio.run(system._warden({"plan": duplicate.model_dump(), "trace": []}))
+        self.assertFalse(rejected_duplicate["warden"]["safety_checks"]["no_duplicate_equivalent_actions"])
 
     def test_failed_fixture_verification_reverses_executed_actions(self):
         settings = self.settings(rollback_test_mode=True)
@@ -138,6 +178,42 @@ class HarisCoreTests(unittest.TestCase):
         self.assertTrue(settings.is_live)
         self.assertFalse(settings.allows_network_writes)
 
+    def test_direct_mutation_api_is_fixture_only_and_cannot_bypass_warden(self):
+        fixture = SimpleNamespace(settings=AppSettings(nac_mode="fixture"))
+        live = SimpleNamespace(settings=AppSettings(nac_mode="live_write", nac_api_token="test-token"))
+        with patch.object(nokia_clients, "get_api_client", return_value=fixture):
+            nokia_clients._require_write_mode()
+        with patch.object(nokia_clients, "get_api_client", return_value=live):
+            with self.assertRaises(HTTPException) as caught:
+                nokia_clients._require_write_mode()
+        self.assertEqual(caught.exception.status_code, 403)
+        self.assertIn("durable WARDEN-authorized workflow", caught.exception.detail)
+
+    def test_manual_autonomous_graph_route_is_fixture_only_in_live_modes(self):
+        live_system = SimpleNamespace(
+            settings=AppSettings(nac_mode="live_write", nac_api_token="test-token"),
+            run_cycle=unittest.mock.AsyncMock(),
+        )
+        with patch.object(nokia_clients, "_authoritative_haris_system", return_value=live_system):
+            with self.assertRaises(HTTPException) as caught:
+                asyncio.run(nokia_clients.authoritative_autonomous_run())
+        self.assertEqual(caught.exception.status_code, 403)
+        live_system.run_cycle.assert_not_awaited()
+
+    def test_camara_api_error_does_not_expose_provider_exception_details(self):
+        sensitive = "https://provider.invalid/resource?token=secret-provider-value"
+
+        async def fail():
+            raise RuntimeError(sensitive)
+
+        with self.assertLogs("haris.nokia", level="WARNING") as captured:
+            with self.assertRaises(HTTPException) as caught:
+                asyncio.run(nokia_clients._wrap(fail))
+        self.assertEqual(caught.exception.status_code, 502)
+        combined = " ".join(captured.output) + " " + str(caught.exception.detail)
+        self.assertNotIn(sensitive, combined)
+        self.assertNotIn("secret-provider-value", combined)
+
     def test_live_geofence_request_uses_installed_sdk_contract(self):
         client = LiveNokiaClient(self.live_settings())
         fake_subscription = SimpleNamespace(event_subscription_id="geo-live-1")
@@ -166,6 +242,7 @@ class HarisCoreTests(unittest.TestCase):
         self.assertIn("NAC_GEOFENCE_SINK", client.action_safety_error("geofence", {"polygon_id": "storm-impact"}))
         self.assertIn("NAC_QOD_SERVICE_IPV4", client.action_safety_error("qos", {"profile": "guaranteed"}))
         self.assertEqual(client.capability_report()["qod"]["status"], "OPERATOR_VALUE_REQUIRED")
+        self.assertEqual(client.capability_report()["trusted_dispatch"]["status"], "PRIVILEGED_ONLY")
 
     def test_live_geofence_event_types_are_validated_against_sdk_enum(self):
         client = LiveNokiaClient(self.live_settings(
@@ -299,7 +376,11 @@ class HarisCoreTests(unittest.TestCase):
         system = HarisAgentSystem(FixtureNokiaClient(settings), settings=settings)
         asyncio.run(system.run_cycle(True))
         cycle = system.current_cycle_status
-        self.assertEqual(len(cycle["plan"]["actions"]), 2)
+        self.assertGreater(len(cycle["plan"]["actions"]), 0)
+        self.assertEqual(
+            len(cycle["plan"]["actions"]),
+            len(cycle["execution"]["actions"]),
+        )
         self.assertTrue(cycle["warden"]["verified"])
         self.assertTrue(cycle["execution"]["executed"])
         self.assertTrue(cycle["verification"]["verified"])

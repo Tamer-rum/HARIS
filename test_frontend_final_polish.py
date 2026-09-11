@@ -1,5 +1,6 @@
 import asyncio
 import math
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -12,6 +13,10 @@ class FinalFrontendPolishTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.source = Path("app.py").read_text(encoding="utf-8")
+
+    def test_streamlit_same_origin_cors_protection_is_enabled(self):
+        config = tomllib.loads(Path(".streamlit/config.toml").read_text(encoding="utf-8"))
+        self.assertIs(config["server"]["enableCORS"], True)
 
     def test_01_operational_cards_use_shared_content_structure(self):
         markup = app.operational_card("Backend Health", "HEALTHY", "All services operational", icon="server")
@@ -130,7 +135,7 @@ class FinalFrontendPolishTests(unittest.TestCase):
     def test_15_authoritative_cycle_payload_drives_result_metrics_without_defaults(self):
         cycle = {
             "plan": {"confidence": .89, "blast_radius": .12, "expected_cost_usd": .75, "actions": [{}, {}]},
-            "execution": {"executed": True, "actions": [{"device_id": "ambulance-01"}, {"device_id": "ambulance-01"}]},
+            "execution": {"executed": True, "actions": [{"device_id": "ambulance-01", "success": True}, {"device_id": "ambulance-01", "success": True}]},
             "verification": {"verified": True, "target_cells": ["T03"], "level_improved": True},
             "devices": [{"device_id": "ambulance-01", "tier": 1}],
         }
@@ -141,6 +146,17 @@ class FinalFrontendPolishTests(unittest.TestCase):
         self.assertEqual(app.authoritative_verification_label(cycle["verification"]), "PASSED")
         self.assertEqual(app.protected_tier1_count(cycle), "1")
         self.assertEqual(app.protected_tier1_count({"execution": {"actions": []}}), "N/A")
+
+    def test_16_protected_tier_one_count_requires_successful_current_execution(self):
+        cycle = {
+            "devices": [{"device_id": "ambulance-01", "tier": 1}, {"device_id": "scada-01", "tier": 1}],
+            "execution": {"actions": [
+                {"device_id": "ambulance-01", "kind": "qos", "success": True},
+                {"device_id": "ambulance-01", "kind": "slice_attach", "success": True},
+                {"device_id": "scada-01", "kind": "qos", "success": False},
+            ]},
+        }
+        self.assertEqual(app.protected_tier1_count(cycle), "1")
 
 
 if __name__ == "__main__":

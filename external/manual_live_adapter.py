@@ -1,3 +1,8 @@
+"""Manual Nokia external-integration diagnostic; never run by offline tests."""
+
+from external._guard import require_external_integration
+require_external_integration()
+
 import asyncio
 
 from config import get_settings

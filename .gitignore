@@ -5,9 +5,11 @@ __pycache__/
 .env.*
 !.env.example
 .haris_memory.json
+.haris_observation_diagnostic.jsonl
 *.pyc
 *.pyo
 *.log
+artifacts/
 
 # IDE / OS
 .vscode/

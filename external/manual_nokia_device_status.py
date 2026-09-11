@@ -1,3 +1,8 @@
+"""Manual Nokia external-integration diagnostic; never run by offline tests."""
+
+from external._guard import require_external_integration
+require_external_integration()
+
 import os
 
 from dotenv import load_dotenv
@@ -13,14 +18,14 @@ if not token:
 
 
 print("=" * 60)
-print("HARIS - NOKIA SIMULATOR LOCATION TEST")
+print("HARIS - NOKIA SIMULATOR DEVICE STATUS TEST")
 print("=" * 60)
 print("NAC token: AVAILABLE")
 print()
 
 
 # ---------------------------------------------------------
-# Create Nokia Network as Code client
+# Create Nokia client
 # ---------------------------------------------------------
 client = nac.NetworkAsCodeClient(token=token)
 
@@ -28,7 +33,7 @@ print("Nokia Network as Code client: CREATED")
 
 
 # ---------------------------------------------------------
-# HARIS test device
+# HARIS T03 -> Nokia Simulator Device
 # ---------------------------------------------------------
 device = client.devices.get(
     phone_number="+999900000001"
@@ -40,34 +45,31 @@ print()
 
 
 # ---------------------------------------------------------
-# Location Retrieval API
-#
-# The installed SDK exposes the API internally as:
-#
-# client._api.location_retrieve
-#
-# The public NetworkAsCodeClient does not expose
-# a client.location namespace in this SDK version.
+# Use the Reachability API already configured
+# inside the Nokia Network as Code client.
 # ---------------------------------------------------------
-location_api = client._api.location_retrieve
+reachability_api = client.device_status.api.reachability_status
 
-print("Location Retrieval API:")
-print(type(location_api))
+print("Reachability API:")
+print(type(reachability_api))
 print()
 
 
 # ---------------------------------------------------------
-# Read-only location request
+# Read-only request
 # ---------------------------------------------------------
-print("Requesting device location...")
+print("Requesting device reachability status...")
 
-result = location_api.get_location(
-    device=device,
-    max_age=60,
+result = reachability_api.get_reachability(
+    device.model_dump(
+        mode="json",
+        by_alias=True,
+        exclude_none=True,
+    )
 )
 
 print()
-print("NOKIA LOCATION RESPONSE:")
+print("NOKIA DEVICE STATUS RESPONSE:")
 print(result)
 
 print()
