@@ -3,7 +3,7 @@
 import asyncio
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from agents import HarisAgentSystem, RemediationPlan
 from config import AppSettings, GeofenceArea
@@ -80,6 +80,47 @@ class HarisCoreTests(unittest.TestCase):
         self.assertEqual(result["active_playbook"]["state"], "MITIGATED")
         self.assertEqual(result["active_playbook"]["current_stage"], "LEARN")
         self.assertEqual(result["active_playbook"]["latest_outcome"], "mitigated")
+
+    def test_isolated_fixture_demo_disables_external_and_durable_history_paths(self):
+        settings = self.settings(
+            public_dust_feed_url="https://external.invalid/dust",
+            gemini_api_key="configured-but-must-not-run",
+            groq_api_key="configured-but-must-not-run",
+        )
+        memory = MagicMock(spec=MemoryStore)
+        memory.search_incidents = AsyncMock(side_effect=AssertionError("durable history read"))
+        memory.remember_incident = AsyncMock(side_effect=AssertionError("durable history write"))
+        client = FixtureNokiaClient(settings)
+        system = HarisAgentSystem(client, memory=memory, settings=settings)
+        observation_store = MagicMock()
+        observation_store.latest_fresh.side_effect = AssertionError("external observation used")
+        system.set_observation_store(observation_store)
+        system._dust_advisory = AsyncMock(side_effect=AssertionError("environmental HTTP path used"))
+        system._crew_advisory = AsyncMock(side_effect=AssertionError("CrewAI path used"))
+        system.reasoning.assess = AsyncMock(side_effect=AssertionError("Gemini/Groq path used"))
+
+        result = asyncio.run(system.run_cycle(True, isolated_fixture_demo=True))
+
+        self.assertTrue(result["warden"]["verified"])
+        self.assertEqual(result["execution_context"], "ISOLATED_FIXTURE_DEMO")
+        self.assertEqual(result["provenance"], "SIMULATED")
+        self.assertEqual(result["authority"], "PROCESS_LOCAL_FIXTURE_DEMO")
+        self.assertFalse(result["learning"]["incident_saved"])
+        self.assertFalse(result["durable_domain_write"])
+        self.assertFalse(result["durable_history_write"])
+        observation_store.latest_fresh.assert_not_called()
+        memory.search_incidents.assert_not_awaited()
+        memory.remember_incident.assert_not_awaited()
+        self.assertEqual(client.state["qos"], {})
+        self.assertEqual(client.state["geofences"], {})
+        self.assertEqual(client.state["slices"], {})
+        self.assertEqual(client.state["audit"], [])
+
+    def test_isolated_fixture_demo_rejects_non_fixture_mode(self):
+        settings = AppSettings(nac_mode="live_read_only")
+        system = HarisAgentSystem(FixtureNokiaClient(settings), settings=settings)
+        with self.assertRaisesRegex(RuntimeError, "require FIXTURE mode"):
+            asyncio.run(system.run_cycle(True, isolated_fixture_demo=True))
 
     def test_device_limit_selects_two_tier_one_devices_and_retains_protection_actions(self):
         settings = self.settings()
@@ -196,7 +237,7 @@ class HarisCoreTests(unittest.TestCase):
         )
         with patch.object(nokia_clients, "_authoritative_haris_system", return_value=live_system):
             with self.assertRaises(HTTPException) as caught:
-                asyncio.run(nokia_clients.authoritative_autonomous_run())
+                asyncio.run(nokia_clients.authoritative_autonomous_run(MagicMock()))
         self.assertEqual(caught.exception.status_code, 403)
         live_system.run_cycle.assert_not_awaited()
 

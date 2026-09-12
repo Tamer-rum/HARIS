@@ -5,6 +5,7 @@ import html
 import json
 import logging
 import math
+import secrets
 import time
 import textwrap
 from pathlib import Path
@@ -753,7 +754,12 @@ def run_async(coro):
             loop.close()
 
 
-async def backend_request(method: str, path: str, payload: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+async def backend_request(
+    method: str,
+    path: str,
+    payload: Optional[Dict[str, Any]] = None,
+    extra_headers: Optional[Dict[str, str]] = None,
+) -> Optional[Dict[str, Any]]:
     """Use Render as authority when the console is deployed separately."""
     if not settings.haris_backend_url:
         return None
@@ -766,6 +772,11 @@ async def backend_request(method: str, path: str, payload: Optional[Dict[str, An
     headers = {
         "Authorization": f"Bearer {settings.haris_backend_api_token.get_secret_value()}"
     }
+    headers.update({
+        key: value
+        for key, value in (extra_headers or {}).items()
+        if key.lower() != "authorization"
+    })
     async with httpx.AsyncClient(timeout=10.0) as http:
         response = await http.request(method, f"{base}{path}", json=payload, headers=headers)
         response.raise_for_status()
@@ -1910,10 +1921,13 @@ def render_controls() -> None:
     a, b, d = st.columns([1.35, 1.35, 2.0])
 
     with a:
+        fixture_demo_complete = bool(st.session_state.get("fixture_demo_completed"))
+        fixture_demo_in_progress = bool(st.session_state.get("fixture_demo_in_progress"))
         if st.button(
             "RUN AUTONOMOUS HARIS",
             use_container_width=True,
             type="primary",
+            disabled=fixture_demo_complete or fixture_demo_in_progress,
         ):
             with st.spinner(
                 "HARIS is executing the closed control loop…"
@@ -1921,12 +1935,20 @@ def render_controls() -> None:
                 start = time.perf_counter()
 
                 try:
+                    st.session_state.fixture_demo_in_progress = True
+                    request_key = st.session_state.get("fixture_demo_request_key")
+                    if not request_key:
+                        request_key = secrets.token_urlsafe(24)
+                        st.session_state.fixture_demo_request_key = request_key
                     # Deployed console: Render owns autonomous execution and
-                    # durable audit history.  Standalone console: retain the
-                    # local fixture-only fallback for development/demo use.
+                    # bounded fixture state. Standalone console retains the
+                    # same isolated fixture-only behavior.
                     if settings.haris_backend_url:
                         payload = run_async(
-                            backend_request("POST", "/api/nac/autonomous/run")
+                            backend_request(
+                                "POST", "/api/nac/autonomous/run",
+                                extra_headers={"Idempotency-Key": request_key},
+                            )
                         )
                         if not payload or not isinstance(payload.get("cycle"), dict):
                             raise RuntimeError("Authoritative HARIS backend did not return a cycle.")
@@ -1934,17 +1956,21 @@ def render_controls() -> None:
                     else:
                         result = run_async(
                             get_system().run_cycle(
-                                dust_advisory=True
+                                dust_advisory=True,
+                                isolated_fixture_demo=True,
                             )
                         )
 
-                    st.session_state.last_result = result
+                    st.session_state.fixture_demo_cycle = result
+                    st.session_state.fixture_demo_completed = True
+                    st.session_state.fixture_demo_in_progress = False
                     st.session_state.last_elapsed = (
                         time.perf_counter() - start
                     )
                     st.rerun()
 
-                except Exception as exc:
+                except Exception:
+                    st.session_state.fixture_demo_in_progress = False
                     logger.warning("HARIS cycle failed; details suppressed")
                     st.error("HARIS cycle failed. Review the authenticated backend status.")
 
@@ -2360,9 +2386,24 @@ def render_console() -> None:
         render_network_intelligence(result)
     elif section == "AUTONOMOUS OPERATIONS":
         render_controls()
-        render_decision_engine(result)
-        render_impact(result)
-        render_playbook_and_feed(result)
+        fixture_demo = st.session_state.get("fixture_demo_cycle")
+        if fixture_demo:
+            render_html(
+                """
+                <div class="notification-panel">
+                  <b>SIMULATED / FIXTURE HARIS DEMONSTRATION</b><br>
+                  Authority: PROCESS-LOCAL FIXTURE DEMO<br>
+                  Provider access: DISABLED<br>
+                  External AI/HTTP access: DISABLED<br>
+                  Durable operational incident: NOT CREATED<br>
+                  Durable history write: DISABLED
+                </div>
+                """
+            )
+        autonomous_result = fixture_demo or result
+        render_decision_engine(autonomous_result)
+        render_impact(autonomous_result)
+        render_playbook_and_feed(autonomous_result)
     elif section == "TRUSTED DISPATCH":
         render_trusted_dispatch(result, supervisory)
     elif section == "HISTORY & AUDIT":

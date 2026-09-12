@@ -135,6 +135,13 @@ class HarisState(TypedDict, total=False):
     durable_reasoning_context: Dict[str, Any]
     durable_policy: Dict[str, Any]
     decision_status: str
+    isolated_fixture_demo: bool
+    execution_context: str
+    provenance: Optional[str]
+    authority: Optional[str]
+    external_access_permitted: Optional[bool]
+    durable_domain_write: Optional[bool]
+    durable_history_write: Optional[bool]
 
 def _safe_json(text: str) -> Dict[str, Any]:
     try:
@@ -415,6 +422,12 @@ class HarisAgentSystem:
         return {
             "cycle_id": state.get("cycle_id"), "final_status": state.get("final_status"),
             "decision_status": state.get("decision_status"),
+            "execution_context": state.get("execution_context"),
+            "provenance": state.get("provenance"),
+            "authority": state.get("authority"),
+            "external_access_permitted": state.get("external_access_permitted"),
+            "durable_domain_write": state.get("durable_domain_write"),
+            "durable_history_write": state.get("durable_history_write"),
             "incident": state.get("incident", {}), "prediction": state.get("prediction", {}),
             # These are the structured authoritative facts needed by the
             # supervisory console; action/session internals remain excluded.
@@ -1253,15 +1266,23 @@ class HarisAgentSystem:
             "SENTINEL: sensing Nokia congestion, device status, and dust advisory",
         )
 
-        state["dust_advisory"], state["environmental_source"] = await self._dust_advisory(
-            state.get("dust_advisory", True)
-        )
+        isolated_fixture_demo = bool(state.get("isolated_fixture_demo"))
+        if isolated_fixture_demo:
+            state["dust_advisory"] = bool(state.get("dust_advisory", True))
+            state["environmental_source"] = EnvironmentalSource.FIXTURE.value
+        else:
+            state["dust_advisory"], state["environmental_source"] = await self._dust_advisory(
+                state.get("dust_advisory", True)
+            )
 
         # Prefer a fresh, backend-authoritative observation snapshot when the
         # separate poller is enabled.  It is factual source data, never a
         # synthetic telemetry stream.  Missing capability data remains absent
         # and the regular safe client read supplies only what is unavailable.
-        snapshot = state.get("observation_snapshot") or (self._observation_store.latest_fresh() if self._observation_store else None)
+        snapshot = None if isolated_fixture_demo else (
+            state.get("observation_snapshot")
+            or (self._observation_store.latest_fresh() if self._observation_store else None)
+        )
         if snapshot and isinstance(snapshot.get("congestion"), list):
             congestion = [CongestionReading(**item) for item in snapshot["congestion"]]
             scope = set(state.get("incident_scope_cells") or [])
@@ -1597,7 +1618,9 @@ class HarisAgentSystem:
             "latest_outcome": "proposed" if all_actions else "no_action_proposed",
         }
         self._trace(state, f"PLAYBOOK_TRIGGERED: {state['active_playbook']['name']}")
-        if state.get("durable_planning_only"):
+        if state.get("isolated_fixture_demo"):
+            prior_incidents = []
+        elif state.get("durable_planning_only"):
             prior_incidents = [
                 IncidentMemory(**item)
                 for item in (state.get("durable_reasoning_context") or {}).get("prior_memory", [])[:3]
@@ -1611,7 +1634,13 @@ class HarisAgentSystem:
             if set(prior.affected_cells) & set(incident.affected_cells)
         ]
         state["memory_context"] = [prior.model_dump() for prior in relevant_priors]
-        crew = await self._crew_advisory(incident, all_actions, relevant_priors)
+        if state.get("isolated_fixture_demo"):
+            crew = {
+                "used": False, "fallback": True, "latency_ms": 0,
+                "roles": [], "reason": "isolated_fixture_demo", "advisory": {},
+            }
+        else:
+            crew = await self._crew_advisory(incident, all_actions, relevant_priors)
         state["crew_advisory"] = crew
         self._trace(
             state,
@@ -1749,12 +1778,17 @@ class HarisAgentSystem:
         # ---------------------------------------------------------
         # 4. Ask the reasoning layer to assess the proposed plan.
         # ---------------------------------------------------------
-        advisory = await self.reasoning.assess(
-            incident,
-            devices,
-            actions,
-            [candidate_id_by_action[id(action)] for action in actions],
-        )
+        if state.get("isolated_fixture_demo"):
+            advisory = self.reasoning._deterministic_result(
+                rationale="External AI is disabled for the isolated fixture demonstration."
+            )
+        else:
+            advisory = await self.reasoning.assess(
+                incident,
+                devices,
+                actions,
+                [candidate_id_by_action[id(action)] for action in actions],
+            )
         self._trace(
             state,
             "AI_PLANNER_USED=" + str(advisory["ai_planner_used"]).lower() +
@@ -2924,22 +2958,34 @@ class HarisAgentSystem:
             rollback=rollback,
         )
 
-        await self.memory.remember_incident(memory)
-
-        state["learning"] = {
-            "incident_saved": True,
-            "memory_count": self.memory.count(),
-            "outcome": outcome,
-        }
+        if state.get("isolated_fixture_demo"):
+            state["learning"] = {
+                "incident_saved": False,
+                "memory_count": None,
+                "outcome": outcome,
+                "reason": "durable_history_disabled_for_isolated_fixture_demo",
+            }
+        else:
+            await self.memory.remember_incident(memory)
+            state["learning"] = {
+                "incident_saved": True,
+                "memory_count": self.memory.count(),
+                "outcome": outcome,
+            }
 
         state["explanation"] = self._explain_cycle(state)
 
         self._trace(
             state,
             (
-                "LEARN: workflow checkpoint stored; "
-                f"outcome={outcome}; "
-                f"episodic memory count={self.memory.count()}"
+                (
+                    "LEARN: isolated fixture result retained in process only; "
+                    if state.get("isolated_fixture_demo") else
+                    "LEARN: workflow checkpoint stored; "
+                )
+                + f"outcome={outcome}; "
+                "episodic memory count="
+                + ("not_persisted" if state.get("isolated_fixture_demo") else str(self.memory.count()))
             ),
         )
 
@@ -3005,13 +3051,23 @@ class HarisAgentSystem:
         incident_scope_cells: Optional[List[str]] = None,
         incident_id: Optional[str] = None,
         observation_snapshot: Optional[Dict[str, Any]] = None,
+        isolated_fixture_demo: bool = False,
     ) -> HarisState:
-       
+        if isolated_fixture_demo and self.settings.nac_mode != "fixture":
+            raise RuntimeError("Isolated fixture demonstrations require FIXTURE mode.")
+
         initial: HarisState = {
             "cycle_id": uuid.uuid4().hex[:10],
             "incident_id": incident_id,
             "incident_scope_cells": incident_scope_cells or [],
-            "observation_snapshot": observation_snapshot,
+            "observation_snapshot": None if isolated_fixture_demo else observation_snapshot,
+            "isolated_fixture_demo": isolated_fixture_demo,
+            "execution_context": "ISOLATED_FIXTURE_DEMO" if isolated_fixture_demo else "STANDARD",
+            "provenance": "SIMULATED" if isolated_fixture_demo else None,
+            "authority": "PROCESS_LOCAL_FIXTURE_DEMO" if isolated_fixture_demo else None,
+            "external_access_permitted": False if isolated_fixture_demo else None,
+            "durable_domain_write": False if isolated_fixture_demo else None,
+            "durable_history_write": False if isolated_fixture_demo else None,
             "dust_advisory": dust_advisory,
             "trace": [],
             "events": [],
@@ -3029,7 +3085,13 @@ class HarisAgentSystem:
             ),
         }
 
-        result = await self.graph.ainvoke(initial)
+        try:
+            result = await self.graph.ainvoke(initial)
+        finally:
+            if isolated_fixture_demo:
+                reset_fixture = getattr(self.client, "reset_isolated_demo_state", None)
+                if callable(reset_fixture):
+                    reset_fixture()
         self._latest_cycle = result
         return result
 

@@ -236,9 +236,10 @@ class DispatchContinuationTests(unittest.TestCase):
 
             def __init__(self):
                 self.calls = []
+                self.client = FixtureNokiaClient(self.settings)
 
-            async def run_cycle(self, *, dust_advisory):
-                self.calls.append(dust_advisory)
+            async def run_cycle(self, *, dust_advisory, isolated_fixture_demo=False):
+                self.calls.append((dust_advisory, isolated_fixture_demo))
 
             @staticmethod
             def _supervisory_safe(value):
@@ -256,16 +257,19 @@ class DispatchContinuationTests(unittest.TestCase):
         backend = BackendSystem()
         register_dispatch_system_factory(lambda: backend)
         with TestClient(api_app) as client:
-            response = client.post("/api/nac/autonomous/run", headers=self.api_headers)
+            response = client.post(
+                "/api/nac/autonomous/run",
+                headers={**self.api_headers, "Idempotency-Key": "dispatch-test-demo-key-123"},
+            )
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(backend.calls, [True])
+        self.assertEqual(backend.calls, [(True, True)])
         cycle = response.json()["cycle"]
         self.assertEqual(cycle["cycle_id"], "cycle-authoritative")
         rendered = str(cycle)
         for sensitive in ("authorization_url", "oauth_state", "consent_action_token", "workflow_session_token", "https://nokia.example/never-return", "never-return"):
             self.assertNotIn(sensitive, rendered)
 
-    def test_backend_authoritative_standard_run_executes_fixture_cycle_and_audits_it(self):
+    def test_backend_authoritative_standard_run_isolated_from_durable_history(self):
         settings = AppSettings(nac_mode="fixture", fixture_dir="fixtures", gemini_api_key=None, groq_api_key=None)
         memory = MemoryStore(settings)
         memory._incidents = []
@@ -273,13 +277,17 @@ class DispatchContinuationTests(unittest.TestCase):
         backend = HarisAgentSystem(FixtureNokiaClient(settings), memory=memory, settings=settings)
         register_dispatch_system_factory(lambda: backend)
         with TestClient(api_app) as client:
-            response = client.post("/api/nac/autonomous/run", headers=self.api_headers)
+            response = client.post(
+                "/api/nac/autonomous/run",
+                headers={**self.api_headers, "Idempotency-Key": "isolated-history-test-key-123"},
+            )
         self.assertEqual(response.status_code, 200)
         cycle = response.json()["cycle"]
         self.assertEqual(cycle["final_status"], "mitigated")
         self.assertEqual(cycle["incident"]["affected_cells"], ["T02", "T03", "T05"])
-        self.assertEqual(memory.count(), 1)
+        self.assertEqual(memory.count(), 0)
         self.assertTrue(memory.verify_audit_chain()["valid"])
+        self.assertFalse(response.json()["durable_history_write"])
 
     def test_backend_supervisory_status_keeps_waiting_incident_and_audits_callback_transition(self):
         settings = AppSettings(nac_mode="fixture", fixture_dir="fixtures", nac_api_token="test", gemini_api_key=None, groq_api_key=None)

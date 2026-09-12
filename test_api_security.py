@@ -31,6 +31,7 @@ AUTH = {"Authorization": f"Bearer {TOKEN}"}
 class ApiSecurityTests(unittest.TestCase):
     def setUp(self):
         operational_rate_limiter.clear()
+        nokia_clients.autonomous_demo_idempotency.clear()
         self.settings = AppSettings(
             nac_mode="fixture", haris_operational_api_token=TOKEN,
             haris_backend_api_token=TOKEN, gemini_api_key=None,
@@ -225,6 +226,63 @@ class ApiSecurityTests(unittest.TestCase):
         self.assertEqual(result, {"mode": "fixture"})
         kwargs = async_client.__aenter__.return_value.request.await_args.kwargs
         self.assertEqual(kwargs["headers"], AUTH)
+
+    def test_streamlit_backend_request_cannot_override_authorization(self):
+        configured = self.settings.model_copy(update={"haris_backend_url": "https://backend.invalid"})
+        response = MagicMock()
+        response.json.return_value = {"ok": True}
+        response.raise_for_status.return_value = None
+        async_client = AsyncMock()
+        async_client.__aenter__.return_value.request.return_value = response
+        async_client.__aexit__.return_value = None
+        with patch.object(streamlit_app, "settings", configured), patch("httpx.AsyncClient", return_value=async_client):
+            asyncio.run(streamlit_app.backend_request(
+                "POST", "/api/nac/autonomous/run",
+                extra_headers={"Authorization": "Bearer attacker", "Idempotency-Key": "opaque-request-key-1234"},
+            ))
+        headers = async_client.__aenter__.return_value.request.await_args.kwargs["headers"]
+        self.assertEqual(headers["Authorization"], f"Bearer {TOKEN}")
+        self.assertEqual(headers["Idempotency-Key"], "opaque-request-key-1234")
+
+    def test_isolated_autonomous_endpoint_is_idempotent_and_fixture_only(self):
+        system = MagicMock()
+        system.settings = self.settings
+        system.client = nokia_clients.FixtureNokiaClient(self.settings)
+        system.run_cycle = AsyncMock()
+        system.current_cycle_status = {
+            "execution_context": "ISOLATED_FIXTURE_DEMO", "provenance": "SIMULATED",
+            "warden": {"verified": True},
+        }
+        system._supervisory_safe.side_effect = lambda value: value
+        headers = {**AUTH, "Idempotency-Key": "opaque-demo-request-12345"}
+        with patch("nokia_clients.get_settings", return_value=self.settings), patch("nokia_clients._authoritative_haris_system", return_value=system), TestClient(nokia_clients.app) as client:
+            first = client.post("/api/nac/autonomous/run", headers=headers)
+            replay = client.post("/api/nac/autonomous/run", headers=headers)
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(replay.json(), first.json())
+        system.run_cycle.assert_awaited_once_with(dust_advisory=True, isolated_fixture_demo=True)
+        self.assertFalse(first.json()["durable_domain_write"])
+        self.assertFalse(first.json()["durable_history_write"])
+
+        non_fixture_adapter = MagicMock()
+        system.client = non_fixture_adapter
+        with patch("nokia_clients.get_settings", return_value=self.settings), patch("nokia_clients._authoritative_haris_system", return_value=system), TestClient(nokia_clients.app) as client:
+            rejected = client.post(
+                "/api/nac/autonomous/run",
+                headers={**AUTH, "Idempotency-Key": "another-demo-request-123"},
+            )
+        self.assertEqual(rejected.status_code, 503)
+
+    def test_isolated_autonomous_in_progress_duplicate_fails_closed(self):
+        guard = nokia_clients._AutonomousDemoIdempotency(ttl_seconds=30, max_entries=2)
+
+        async def exercise():
+            self.assertIsNone(await guard.begin("opaque-concurrent-key-123"))
+            with self.assertRaises(HTTPException) as duplicate:
+                await guard.begin("opaque-concurrent-key-123")
+            return duplicate.exception.status_code
+
+        self.assertEqual(asyncio.run(exercise()), 409)
 
     def test_secret_never_appears_in_auth_error_or_logs(self):
         with self.assertLogs("haris.security-test", level="WARNING") as captured:

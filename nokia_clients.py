@@ -1,5 +1,6 @@
 from __future__ import annotations
 import asyncio
+from collections import OrderedDict
 import inspect
 import json
 import logging
@@ -232,6 +233,14 @@ class FixtureNokiaClient(BaseNokiaClient):
             }
             for row in rows
         }
+
+    def reset_isolated_demo_state(self) -> None:
+        """Discard one demo's transient resources and restore fixture evidence."""
+        self.state["qos"].clear()
+        self.state["geofences"].clear()
+        self.state["slices"].clear()
+        self.state["audit"].clear()
+        self._initialise_network_state()
 
     def _load(self, name: str, default: Any) -> Any:
         path = self.root / f"{name}.json"
@@ -1218,6 +1227,54 @@ def _authoritative_haris_system() -> Any:
     return dispatch_system_factory()
 
 
+class _AutonomousDemoIdempotency:
+    """Bounded replay guard for the established single-process demo topology."""
+
+    def __init__(self, *, ttl_seconds: int = 300, max_entries: int = 128) -> None:
+        self.ttl_seconds = ttl_seconds
+        self.max_entries = max_entries
+        self._lock = asyncio.Lock()
+        self.execution_lock = asyncio.Lock()
+        self._entries: "OrderedDict[str, tuple[str, float, Optional[Dict[str, Any]]]]" = OrderedDict()
+
+    async def begin(self, key: str) -> Optional[Dict[str, Any]]:
+        if not (16 <= len(key) <= 128) or not all(
+            character.isalnum() or character in "-_.~" for character in key
+        ):
+            raise HTTPException(status_code=400, detail="A valid opaque Idempotency-Key is required.")
+        now = time.monotonic()
+        async with self._lock:
+            expired = [name for name, (_, deadline, _) in self._entries.items() if deadline <= now]
+            for name in expired:
+                self._entries.pop(name, None)
+            existing = self._entries.get(key)
+            if existing:
+                status, _, response = existing
+                self._entries.move_to_end(key)
+                if status == "IN_PROGRESS":
+                    raise HTTPException(status_code=409, detail="The isolated fixture demonstration is already in progress.")
+                return response
+            while len(self._entries) >= self.max_entries:
+                self._entries.popitem(last=False)
+            self._entries[key] = ("IN_PROGRESS", now + self.ttl_seconds, None)
+            return None
+
+    async def complete(self, key: str, response: Dict[str, Any]) -> None:
+        async with self._lock:
+            self._entries[key] = ("COMPLETED", time.monotonic() + self.ttl_seconds, response)
+            self._entries.move_to_end(key)
+
+    async def fail(self, key: str) -> None:
+        async with self._lock:
+            self._entries.pop(key, None)
+
+    def clear(self) -> None:
+        self._entries.clear()
+
+
+autonomous_demo_idempotency = _AutonomousDemoIdempotency()
+
+
 async def start_number_verification_for_dispatch(pending: PendingDispatch, settings: Optional[AppSettings] = None) -> Dict[str, str]:
     """Start the existing Nokia SDK OAuth flow, bound to one pending dispatch."""
     settings = settings or get_settings()
@@ -1315,7 +1372,7 @@ async def authoritative_field_intervention_demo() -> Dict[str, Any]:
 
 
 @router.post("/autonomous/run")
-async def authoritative_autonomous_run() -> Dict[str, Any]:
+async def authoritative_autonomous_run(request: Request) -> Dict[str, Any]:
     """Run one standard cycle in the backend-owned HARIS authority.
 
     This endpoint deliberately accepts no operator-controlled safety, network,
@@ -1328,10 +1385,28 @@ async def authoritative_autonomous_run() -> Dict[str, Any]:
             status_code=403,
             detail="Manual graph cycles are fixture-only; live incidents enter through the durable event runtime.",
         )
-    await system.run_cycle(dust_advisory=True)
-    # A cycle is rendered by the separate Streamlit supervisor, so apply the
-    # same defence-in-depth redaction used by the authoritative status view.
-    return {"cycle": system._supervisory_safe(system.current_cycle_status)}
+    if not isinstance(system.client, FixtureNokiaClient):
+        raise HTTPException(status_code=503, detail="Isolated fixture demonstration adapter is unavailable.")
+    idempotency_key = request.headers.get("idempotency-key", "")
+    cached = await autonomous_demo_idempotency.begin(idempotency_key)
+    if cached is not None:
+        return cached
+    try:
+        async with autonomous_demo_idempotency.execution_lock:
+            await system.run_cycle(dust_advisory=True, isolated_fixture_demo=True)
+            response = {
+                "cycle": system._supervisory_safe(system.current_cycle_status),
+                "execution_context": "ISOLATED_FIXTURE_DEMO",
+                "provenance": "SIMULATED",
+                "authority": "PROCESS_LOCAL_FIXTURE_DEMO",
+                "durable_domain_write": False,
+                "durable_history_write": False,
+            }
+        await autonomous_demo_idempotency.complete(idempotency_key, response)
+        return response
+    except Exception:
+        await autonomous_demo_idempotency.fail(idempotency_key)
+        raise
 
 
 @router.get("/autonomous/status")

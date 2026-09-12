@@ -116,10 +116,23 @@ class FinalFrontendPolishTests(unittest.TestCase):
     def test_09_deployed_autonomous_run_uses_backend_authority_with_local_fallback(self):
         controls_start = self.source.index("def render_controls()")
         controls = self.source[controls_start:self.source.index("def render_", controls_start + 4)]
-        self.assertIn('backend_request("POST", "/api/nac/autonomous/run")', controls)
+        self.assertIn('"POST", "/api/nac/autonomous/run"', controls)
         self.assertIn("if settings.haris_backend_url:", controls)
         self.assertIn("result = payload[\"cycle\"]", controls)
         self.assertIn("get_system().run_cycle(", controls)
+        self.assertIn('extra_headers={"Idempotency-Key": request_key}', controls)
+        self.assertIn("st.session_state.fixture_demo_cycle = result", controls)
+        self.assertNotIn("st.session_state.last_result = result", controls)
+
+    def test_isolated_fixture_demo_is_presented_separately_from_durable_authority(self):
+        console_start = self.source.index("def render_console()")
+        console = self.source[console_start:]
+        self.assertIn('fixture_demo = st.session_state.get("fixture_demo_cycle")', console)
+        self.assertIn("SIMULATED / FIXTURE HARIS DEMONSTRATION", console)
+        self.assertIn("Authority: PROCESS-LOCAL FIXTURE DEMO", console)
+        self.assertIn("Durable operational incident: NOT CREATED", console)
+        self.assertIn("Durable history write: DISABLED", console)
+        self.assertIn('result = (supervisory or {}).get("cycle")', console)
 
     def test_10_impact_waits_for_authoritative_verification(self):
         impact_start = self.source.index("def render_impact(")
