@@ -3101,7 +3101,9 @@ class HarisAgentSystem:
         self._latest_cycle = result
         return result
 
-    async def run_field_intervention_demo(self) -> HarisState:
+    async def run_field_intervention_demo(
+        self, *, isolated_fixture_demo: bool = False
+    ) -> HarisState:
         """Fixture-only demo of a physical condition beyond Nokia network APIs."""
         if self.settings.nac_mode != "fixture":
             raise RuntimeError("Field Intervention Demo is available only in FIXTURE mode.")
@@ -3112,6 +3114,7 @@ class HarisAgentSystem:
             field_intervention_site="T03",
             field_intervention_skills=["tower-inspection", "power"],
             field_intervention_reason="Simulated critical tower power reserve requires physical inspection.",
+            isolated_fixture_demo=isolated_fixture_demo,
         )
 
     async def recover_normalized_incident(self, *, dust_advisory: bool = False) -> Dict[str, Any]:

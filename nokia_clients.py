@@ -1273,6 +1273,7 @@ class _AutonomousDemoIdempotency:
 
 
 autonomous_demo_idempotency = _AutonomousDemoIdempotency()
+field_intervention_demo_idempotency = _AutonomousDemoIdempotency()
 
 FIELD_INTERVENTION_DIAGNOSTIC_STAGES = frozenset({
     "FIELD_SYSTEM_CONSTRUCTION",
@@ -1383,7 +1384,7 @@ async def incident_replay(cycle_id: str) -> Dict[str, Any]:
 
 
 @router.post("/autonomous/field-intervention-demo")
-async def authoritative_field_intervention_demo() -> Any:
+async def authoritative_field_intervention_demo(request: Request) -> Any:
     """Fixture-only backend-owned dispatch demo; no caller selects trust inputs."""
     try:
         system = _authoritative_haris_system()
@@ -1393,9 +1394,14 @@ async def authoritative_field_intervention_demo() -> Any:
         return _field_intervention_failure("FIELD_SYSTEM_CONSTRUCTION")
     if system.settings.nac_mode != "fixture":
         raise HTTPException(status_code=403, detail="Field Intervention Demo is available only in FIXTURE mode.")
+    idempotency_key = request.headers.get("idempotency-key", "")
+    cached = await field_intervention_demo_idempotency.begin(idempotency_key)
+    if cached is not None:
+        return cached
     try:
-        await system.run_field_intervention_demo()
+        await system.run_field_intervention_demo(isolated_fixture_demo=True)
     except Exception:
+        await field_intervention_demo_idempotency.fail(idempotency_key)
         return _field_intervention_failure(
             getattr(system, "field_intervention_diagnostic_stage", "FIELD_CYCLE_EXECUTION")
         )
@@ -1405,8 +1411,15 @@ async def authoritative_field_intervention_demo() -> Any:
         if dispatch.get("pending_id") and system.dispatch_authorization_url:
             action_token = frontend_consent_tokens.issue(dispatch["pending_id"])
         workflow_token = frontend_workflow_sessions.issue(dispatch["incident_id"]) if dispatch.get("incident_id") else None
-        return {"cycle": system.current_cycle_status, "consent_action_token": action_token, "workflow_session_token": workflow_token}
+        response = {
+            "cycle": system.current_cycle_status,
+            "consent_action_token": action_token,
+            "workflow_session_token": workflow_token,
+        }
+        await field_intervention_demo_idempotency.complete(idempotency_key, response)
+        return response
     except Exception:
+        await field_intervention_demo_idempotency.fail(idempotency_key)
         return _field_intervention_failure("FIELD_RESULT_CONSTRUCTION")
 
 

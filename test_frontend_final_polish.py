@@ -134,6 +134,34 @@ class FinalFrontendPolishTests(unittest.TestCase):
         self.assertIn("Durable history write: DISABLED", console)
         self.assertIn('result = (supervisory or {}).get("cycle")', console)
 
+    def test_field_demo_uses_bounded_idempotency_and_safe_error_copy(self):
+        controls_start = self.source.index("def render_controls()")
+        controls = self.source[controls_start:self.source.index("def render_", controls_start + 4)]
+        self.assertIn('"Idempotency-Key": request_key', controls)
+        self.assertIn('field_demo_in_progress', controls)
+        self.assertIn('field_demo_completed', controls)
+        self.assertIn('Field intervention could not complete.', controls)
+        self.assertIn('Diagnostic stage: {exc.stage}', controls)
+        self.assertNotIn('Field intervention demo failed. Review the authenticated backend status.', controls)
+
+    def test_fixture_demo_trace_is_explicitly_simulated_and_process_local(self):
+        presented = app.fixture_demo_presentation_cycle({
+            "trace": [
+                "12:00 | ACTUATOR: QoD created session=fixture",
+                "12:01 | ACTUATOR: slice attached device=fixture",
+                "12:02 | ACTUATOR: geofence created subscription=fixture",
+                "12:03 | LEARN: isolated fixture result retained in process only; outcome=verified",
+            ]
+        })
+        rendered = " ".join(presented["trace"])
+        self.assertEqual(rendered.count("SIMULATED ACTUATOR:"), 3)
+        self.assertIn("process-local demo incident retained only for display", rendered)
+        self.assertIn("durable history disabled", rendered)
+
+    def test_streamlit_width_deprecation_is_removed(self):
+        self.assertNotIn("use_container_width=", self.source)
+        self.assertIn('width="stretch"', self.source)
+
     def test_10_impact_waits_for_authoritative_verification(self):
         impact_start = self.source.index("def render_impact(")
         impact = self.source[impact_start:self.source.index("def render_", impact_start + 4)]

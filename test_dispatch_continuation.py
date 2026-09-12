@@ -11,7 +11,7 @@ from dispatch import DispatchAttempt, PendingDispatchStore, frontend_consent_tok
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from memory import IncidentMemory, MemoryStore
-from nokia_clients import app as api_app, number_verification_callback, number_verification_states, register_dispatch_resume_handler, register_dispatch_system_factory, register_dispatch_verification_failure_handler, verified_identities
+from nokia_clients import app as api_app, field_intervention_demo_idempotency, number_verification_callback, number_verification_states, register_dispatch_resume_handler, register_dispatch_system_factory, register_dispatch_verification_failure_handler, verified_identities
 from nokia_clients import FixtureNokiaClient
 
 
@@ -22,6 +22,7 @@ class DispatchContinuationTests(unittest.TestCase):
         number_verification_states._pending = {}
         trusted_dispatch_history._attempts = []
         verified_identities._verified_at = {}
+        field_intervention_demo_idempotency.clear()
         self.api_token = "test-operational-token"
         self.api_headers = {"Authorization": f"Bearer {self.api_token}"}
         self.api_settings = AppSettings(
@@ -192,14 +193,20 @@ class DispatchContinuationTests(unittest.TestCase):
                 "audit": {"chain": {"valid": True, "records": 1}, "records": [{"cycle_id": "cycle-1", "incident_id": "incident-1", "outcome": "waiting_for_identity_verification"}]},
             }
             def __init__(self): self.calls = 0
-            async def run_field_intervention_demo(self): self.calls += 1
+            async def run_field_intervention_demo(self, *, isolated_fixture_demo=False):
+                self.calls += 1
+                self.isolated = isolated_fixture_demo
         backend = BackendSystem()
         register_dispatch_system_factory(lambda: backend)
         with TestClient(api_app) as client:
-            response = client.post("/api/nac/autonomous/field-intervention-demo", headers=self.api_headers)
+            response = client.post(
+                "/api/nac/autonomous/field-intervention-demo",
+                headers={**self.api_headers, "Idempotency-Key": "field-demo-test-key-0001"},
+            )
             status = client.get("/api/nac/autonomous/status", headers=self.api_headers)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(backend.calls, 1)
+        self.assertTrue(backend.isolated)
         self.assertEqual(response.json()["cycle"]["trusted_dispatch"]["masked_phone_number"], "***1000")
         self.assertNotIn("authorization_url", response.json()["cycle"])
         self.assertNotIn("authorization_url", status.json())
@@ -226,7 +233,7 @@ class DispatchContinuationTests(unittest.TestCase):
             settings = AppSettings(nac_mode="fixture")
             field_intervention_diagnostic_stage = "FIELD_NUMBER_VERIFICATION_START"
 
-            async def run_field_intervention_demo(self):
+            async def run_field_intervention_demo(self, *, isolated_fixture_demo=False):
                 raise RuntimeError(secret)
 
         with patch("nokia_clients._authoritative_haris_system", return_value=FailingSystem()), \
@@ -234,7 +241,7 @@ class DispatchContinuationTests(unittest.TestCase):
                 TestClient(api_app) as client:
             response = client.post(
                 "/api/nac/autonomous/field-intervention-demo",
-                headers=self.api_headers,
+                headers={**self.api_headers, "Idempotency-Key": "field-demo-test-key-0002"},
             )
         self.assertEqual(response.status_code, 500)
         self.assertEqual(response.json(), {
@@ -250,7 +257,8 @@ class DispatchContinuationTests(unittest.TestCase):
         with patch("nokia_clients._authoritative_haris_system", side_effect=RuntimeError("secret")), \
                 TestClient(api_app) as client:
             construction = client.post(
-                "/api/nac/autonomous/field-intervention-demo", headers=self.api_headers
+                "/api/nac/autonomous/field-intervention-demo",
+                headers={**self.api_headers, "Idempotency-Key": "field-demo-test-key-0003"},
             )
         self.assertEqual(construction.json()["stage"], "FIELD_SYSTEM_CONSTRUCTION")
 
@@ -259,7 +267,7 @@ class DispatchContinuationTests(unittest.TestCase):
             field_intervention_diagnostic_stage = "FIELD_CYCLE_EXECUTION"
             dispatch_authorization_url = None
 
-            async def run_field_intervention_demo(self):
+            async def run_field_intervention_demo(self, *, isolated_fixture_demo=False):
                 return None
 
             @property
@@ -269,7 +277,8 @@ class DispatchContinuationTests(unittest.TestCase):
         with patch("nokia_clients._authoritative_haris_system", return_value=ResultFailure()), \
                 TestClient(api_app) as client:
             result = client.post(
-                "/api/nac/autonomous/field-intervention-demo", headers=self.api_headers
+                "/api/nac/autonomous/field-intervention-demo",
+                headers={**self.api_headers, "Idempotency-Key": "field-demo-test-key-0004"},
             )
         self.assertEqual(result.status_code, 500)
         self.assertEqual(result.json()["stage"], "FIELD_RESULT_CONSTRUCTION")
@@ -288,16 +297,81 @@ class DispatchContinuationTests(unittest.TestCase):
                     "trusted_dispatch": current_dispatch_status,
                 }
 
-                async def run_field_intervention_demo(self):
+                async def run_field_intervention_demo(self, *, isolated_fixture_demo=False):
                     return None
 
             with self.subTest(status=status), \
                     patch("nokia_clients._authoritative_haris_system", return_value=BusinessSystem()), \
                     TestClient(api_app) as client:
                 response = client.post(
-                    "/api/nac/autonomous/field-intervention-demo", headers=self.api_headers
+                    "/api/nac/autonomous/field-intervention-demo",
+                    headers={
+                        **self.api_headers,
+                        "Idempotency-Key": f"field-demo-business-{status.lower()}",
+                    },
                 )
             self.assertEqual(response.status_code, 200)
+
+    def test_field_intervention_route_replays_completed_idempotency_key(self):
+        class BackendSystem:
+            settings = AppSettings(nac_mode="fixture")
+            dispatch_authorization_url = None
+            current_dispatch_status = {
+                "incident_id": "incident-idempotent", "decision": "BLOCK",
+                "status": "WAITING_FOR_IDENTITY_VERIFICATION",
+            }
+            current_cycle_status = {
+                "final_status": "waiting_for_identity_verification",
+                "trusted_dispatch": current_dispatch_status,
+            }
+
+            def __init__(self):
+                self.calls = 0
+
+            async def run_field_intervention_demo(self, *, isolated_fixture_demo=False):
+                self.calls += 1
+                self.isolated = isolated_fixture_demo
+
+        backend = BackendSystem()
+        headers = {**self.api_headers, "Idempotency-Key": "field-demo-replay-key-0001"}
+        with patch("nokia_clients._authoritative_haris_system", return_value=backend), \
+                TestClient(api_app) as client:
+            first = client.post("/api/nac/autonomous/field-intervention-demo", headers=headers)
+            replay = client.post("/api/nac/autonomous/field-intervention-demo", headers=headers)
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(replay.json(), first.json())
+        self.assertEqual(backend.calls, 1)
+        self.assertTrue(backend.isolated)
+
+    def test_actual_field_intervention_http_route_isolated_and_pending(self):
+        settings = AppSettings(
+            nac_mode="fixture", fixture_dir="fixtures",
+            haris_operational_api_token=self.api_token,
+            gemini_api_key=None, groq_api_key=None,
+        )
+        memory = MemoryStore(settings)
+        memory._incidents = []
+        memory._save_local_policies = lambda: None
+        backend = HarisAgentSystem(FixtureNokiaClient(settings), memory=memory, settings=settings)
+        headers = {**self.api_headers, "Idempotency-Key": "field-demo-actual-route-0001"}
+        with patch("nokia_clients.get_settings", return_value=settings), \
+                patch("nokia_clients._authoritative_haris_system", return_value=backend), \
+                patch(
+                    "agents.start_number_verification_for_dispatch",
+                    new=AsyncMock(return_value={
+                        "authorization_url": "https://provider.invalid/consent",
+                        "expires_in_seconds": "300",
+                    }),
+                ) as verification_start, TestClient(api_app) as client:
+            response = client.post("/api/nac/autonomous/field-intervention-demo", headers=headers)
+        self.assertEqual(response.status_code, 200)
+        cycle = response.json()["cycle"]
+        self.assertEqual(cycle["final_status"], "waiting_for_identity_verification")
+        self.assertEqual(cycle["trusted_dispatch"]["status"], "WAITING_FOR_IDENTITY_VERIFICATION")
+        self.assertEqual(cycle["execution_context"], "ISOLATED_FIXTURE_DEMO")
+        self.assertFalse(cycle["durable_history_write"])
+        self.assertEqual(memory.count(), 0)
+        verification_start.assert_awaited_once()
 
     def test_backend_authoritative_standard_run_uses_shared_system_and_sanitizes_cycle(self):
         class BackendSystem:

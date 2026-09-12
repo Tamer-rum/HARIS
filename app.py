@@ -1970,7 +1970,7 @@ def render_controls() -> None:
         fixture_demo_in_progress = bool(st.session_state.get("fixture_demo_in_progress"))
         if st.button(
             "RUN AUTONOMOUS HARIS",
-            use_container_width=True,
+            width="stretch",
             type="primary",
             disabled=fixture_demo_complete or fixture_demo_in_progress,
         ):
@@ -2014,26 +2014,33 @@ def render_controls() -> None:
                     )
                     st.rerun()
 
-                except BackendSafeDiagnosticError as exc:
-                    logger.warning("HARIS field intervention demo failed at safe stage=%s", exc.stage)
-                    st.error("Field intervention could not complete.")
-                    st.caption(f"Diagnostic stage: {exc.stage}")
                 except Exception:
                     st.session_state.fixture_demo_in_progress = False
                     logger.warning("HARIS cycle failed; details suppressed")
                     st.error("HARIS cycle failed. Review the authenticated backend status.")
 
     with b:
+        field_demo_complete = bool(st.session_state.get("field_demo_completed"))
+        field_demo_in_progress = bool(st.session_state.get("field_demo_in_progress"))
         if settings.nac_mode == "fixture" and st.button(
             "RUN FIELD INTERVENTION DEMO",
-            use_container_width=True,
+            width="stretch",
             help="SIMULATED FIXTURE evidence: a tower power condition requires privileged physical intervention.",
+            disabled=field_demo_complete or field_demo_in_progress,
         ):
             with st.spinner("HARIS is running the simulated physical-intervention workflow…"):
                 start = time.perf_counter()
                 try:
+                    st.session_state.field_demo_in_progress = True
                     if settings.haris_backend_url:
-                        payload = run_async(backend_request("POST", "/api/nac/autonomous/field-intervention-demo"))
+                        request_key = st.session_state.get("field_demo_request_key")
+                        if not request_key:
+                            request_key = secrets.token_urlsafe(24)
+                            st.session_state.field_demo_request_key = request_key
+                        payload = run_async(backend_request(
+                            "POST", "/api/nac/autonomous/field-intervention-demo",
+                            extra_headers={"Idempotency-Key": request_key},
+                        ))
                         if not payload:
                             raise RuntimeError("Authoritative HARIS backend did not return a demo status.")
                         st.session_state.last_result = payload.get("cycle", {})
@@ -2047,12 +2054,22 @@ def render_controls() -> None:
                         # Local standalone fixture fallback only. A deployed
                         # console must configure HARIS_BACKEND_URL so Render
                         # owns pending dispatch/OAuth state.
-                        st.session_state.last_result = run_async(get_system().run_field_intervention_demo())
+                        st.session_state.last_result = run_async(
+                            get_system().run_field_intervention_demo(isolated_fixture_demo=True)
+                        )
+                    st.session_state.field_demo_completed = True
+                    st.session_state.field_demo_in_progress = False
                     st.session_state.last_elapsed = time.perf_counter() - start
                     st.rerun()
+                except BackendSafeDiagnosticError as exc:
+                    st.session_state.field_demo_in_progress = False
+                    logger.warning("HARIS field intervention demo failed at safe stage=%s", exc.stage)
+                    st.error("Field intervention could not complete.")
+                    st.caption(f"Diagnostic stage: {exc.stage}")
                 except Exception:
+                    st.session_state.field_demo_in_progress = False
                     logger.warning("HARIS field intervention demo failed; details suppressed")
-                    st.error("Field intervention demo failed. Review the authenticated backend status.")
+                    st.error("Field intervention could not complete.")
 
     with d:
         elapsed = st.session_state.get("last_elapsed")
@@ -2157,7 +2174,7 @@ def render_history(supervisory: Optional[Dict[str, Any]] = None) -> None:
             '<div class="section-title"><span class="section-mark">●</span><span>DURABLE OPERATOR TIMELINE</span></div>',
             unsafe_allow_html=True,
         )
-        st.dataframe(timeline, use_container_width=True, hide_index=True)
+        st.dataframe(timeline, width="stretch", hide_index=True)
         st.caption("Timeline authority: DERIVED FROM DURABLE incident, action, verification, and recovery records.")
     if not records and durable_history:
         records = durable_history
@@ -2194,7 +2211,7 @@ def render_playbook_and_feed(result: Optional[Dict[str, Any]]) -> None:
     st.json(playbook or {"name": "N/A", "state": "IDLE", "latest_outcome": "N/A"})
     st.markdown('<div class="section-title"><span class="section-mark">●</span><span>INCIDENT FEED</span></div>', unsafe_allow_html=True)
     events = cycle.get("events") or []
-    if events: st.dataframe(events, use_container_width=True, hide_index=True)
+    if events: st.dataframe(events, width="stretch", hide_index=True)
     else: st.caption("No incident events yet.")
     dispatch = safe_mapping(cycle.get("trusted_dispatch"))
     if dispatch:
@@ -2294,7 +2311,7 @@ def render_network_intelligence(result: Optional[Dict[str, Any]]) -> None:
     render_network_section(result)
     geofence_events = [event for event in (safe_mapping(result).get("events") or []) if "GEOFENCE" in safe_upper(safe_mapping(event).get("message"), "")]
     st.markdown('### GEOFENCE EVENTS')
-    if geofence_events: st.dataframe(geofence_events, use_container_width=True, hide_index=True)
+    if geofence_events: st.dataframe(geofence_events, width="stretch", hide_index=True)
     else: st.caption("No Nokia geofence enter/exit event received.")
 
 
@@ -2365,7 +2382,7 @@ def render_trusted_dispatch(result: Optional[Dict[str, Any]], supervisory: Optio
         st.json(safe_status)
         if history:
             st.caption("BACKEND DISPATCH ATTEMPTS")
-            st.dataframe(history, use_container_width=True, hide_index=True)
+            st.dataframe(history, width="stretch", hide_index=True)
         if dispatch.get("status") == "WAITING_FOR_IDENTITY_VERIFICATION": st.warning("Awaiting consent-bound Nokia Number Verification; dispatch remains blocked.")
         authorization_url = st.session_state.get("backend_authorization_url") if settings.haris_backend_url else get_system().dispatch_authorization_url
         if settings.haris_backend_url and not authorization_url and not st.session_state.get("backend_consent_action_token") and st.session_state.get("backend_workflow_session_token"):
@@ -2397,6 +2414,26 @@ def render_history_audit(result: Optional[Dict[str, Any]], supervisory: Optional
     render_history(supervisory)
     render_section_header("LEARNED MEMORY")
     st.json((result or {}).get("learning") or {"status": "No completed cycle in this session."})
+
+
+def fixture_demo_presentation_cycle(cycle: Dict[str, Any]) -> Dict[str, Any]:
+    """Clarify simulated effects without altering the stored fixture result."""
+    presented = dict(cycle)
+    trace = []
+    for raw_line in cycle.get("trace") or []:
+        line = str(raw_line)
+        if "ACTUATOR:" in line and any(
+            marker in line for marker in ("QoD created", "slice attached", "geofence created", "executed")
+        ):
+            line = line.replace("ACTUATOR:", "SIMULATED ACTUATOR:", 1)
+        if "LEARN: isolated fixture result retained in process only" in line:
+            line = line.replace(
+                "LEARN: isolated fixture result retained in process only",
+                "LEARN: process-local demo incident retained only for display; durable history disabled",
+            )
+        trace.append(line)
+    presented["trace"] = trace
+    return presented
 
 
 # ============================================================================
@@ -2449,7 +2486,7 @@ def render_console() -> None:
                 </div>
                 """
             )
-        autonomous_result = fixture_demo or result
+        autonomous_result = fixture_demo_presentation_cycle(fixture_demo) if fixture_demo else result
         render_decision_engine(autonomous_result)
         render_impact(autonomous_result)
         render_playbook_and_feed(autonomous_result)
