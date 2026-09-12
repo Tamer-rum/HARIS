@@ -3,8 +3,14 @@ import contextlib
 import io
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
+
+from fastapi.testclient import TestClient
 
 from external import nokia_live_read_canary as canary
+import nokia_clients
+from config import AppSettings
+from runtime import RuntimeEnvironment
 
 
 def valid_environment():
@@ -193,6 +199,76 @@ class NokiaLiveReadCanaryTests(unittest.TestCase):
             self.assertNotIn("PRIVATE", stream.getvalue())
         finally:
             canary.run_canary = original
+
+
+class NokiaLiveReadCanaryEndpointTests(unittest.TestCase):
+    def setUp(self):
+        nokia_clients._live_read_canary_executed = False
+        nokia_clients.operational_rate_limiter.clear()
+        self.token = "test-only-operational-token"
+        self.settings = AppSettings(
+            nac_mode="fixture",
+            haris_operational_api_token=self.token,
+            nac_api_token="test-only-nokia-placeholder",
+            nokia_observation_enabled=False,
+            enable_continuous_loop=False,
+            enable_live_write_loop=False,
+        )
+
+    def _request(self, *, authorization=None, client=None):
+        headers = {"Authorization": authorization} if authorization else {}
+        fake = client or FakeClient()
+        with patch("nokia_clients.get_settings", return_value=self.settings), \
+                patch("nokia_clients.runtime_environment", return_value=RuntimeEnvironment.PRODUCTION), \
+                patch("nokia_clients.LiveNokiaClient", return_value=fake), \
+                TestClient(nokia_clients.app) as api:
+            response = api.post("/api/nac/admin/live-read-canary", headers=headers)
+        return response, fake
+
+    def test_endpoint_requires_existing_operational_authentication(self):
+        missing, client = self._request()
+        self.assertEqual(missing.status_code, 401)
+        self.assertEqual(client.calls, [])
+        invalid, client = self._request(authorization="Bearer invalid")
+        self.assertEqual(invalid.status_code, 403)
+        self.assertEqual(client.calls, [])
+
+    def test_valid_auth_runs_only_three_reads_and_returns_sanitized_contract(self):
+        response, client = self._request(authorization=f"Bearer {self.token}")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(client.calls, [
+            ("congestion", ("T03",)),
+            ("reachability", ("ambulance-01",)),
+            ("location", ("ambulance-01",)),
+        ])
+        body = response.json()
+        self.assertEqual(body["explicit_reads"], 3)
+        self.assertEqual(body["provider_mutations"], 0)
+        for name in ("congestion", "reachability", "location"):
+            self.assertEqual(body[name], {"classification": "SUCCESS", "provenance": "NOKIA_LIVE"})
+        self.assertNotIn("test-only", response.text)
+        self.assertNotIn("latitude", response.text.lower())
+
+    def test_timeout_and_unauthorized_are_classified_without_raw_error(self):
+        private = "raw-provider-token-coordinate"
+        client = FakeClient(failures={
+            "congestion": TimeoutError(private),
+            "reachability": type("AuthenticationException", (Exception,), {})(private),
+        })
+        response, client = self._request(
+            authorization=f"Bearer {self.token}", client=client,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["congestion"]["classification"], "TIMEOUT")
+        self.assertEqual(response.json()["reachability"]["classification"], "UNAUTHORIZED")
+        self.assertNotIn(private, response.text)
+
+    def test_endpoint_is_process_local_one_shot(self):
+        first, client = self._request(authorization=f"Bearer {self.token}")
+        second, _ = self._request(authorization=f"Bearer {self.token}", client=client)
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 409)
+        self.assertEqual(len(client.calls), 3)
 
 
 if __name__ == "__main__":

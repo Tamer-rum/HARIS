@@ -45,6 +45,7 @@ class ApiSecurityTests(unittest.TestCase):
         self.assertEqual(classify_route("GET", "/api/v1/noc/snapshot"), RouteClass.OPERATIONAL_READ)
         self.assertEqual(classify_route("GET", "/api/nac/incidents/id-1"), RouteClass.OPERATIONAL_READ)
         self.assertEqual(classify_route("POST", "/api/nac/autonomous/run"), RouteClass.CONTROL_IDENTITY)
+        self.assertEqual(classify_route("POST", "/api/nac/admin/live-read-canary"), RouteClass.CONTROL_IDENTITY)
         self.assertEqual(classify_route("DELETE", "/api/nac/qos/opaque"), RouteClass.FIXTURE_MUTATION)
         self.assertEqual(classify_route("POST", "/api/events/nokia/congestion"), RouteClass.PROVIDER_CALLBACK)
 

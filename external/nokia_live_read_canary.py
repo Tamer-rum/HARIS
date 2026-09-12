@@ -74,6 +74,23 @@ async def _classified_read(operation: Callable[[], Any]) -> str:
     return "SUCCESS" if isinstance(result, list) and bool(result) else "UNAVAILABLE"
 
 
+async def run_classified_reads(client: Any) -> tuple[dict[str, str], int]:
+    """Run the fixed three-read canary plan without exposing provider values."""
+    attempted = 0
+    results: dict[str, str] = {}
+    operations = (
+        ("CONGESTION", lambda: client.congestion_insights([TARGET_CELL])),
+        ("REACHABILITY", lambda: client.device_status([TARGET_DEVICE])),
+        ("LOCATION", lambda: client.location_retrieval([TARGET_DEVICE])),
+    )
+    for capability, operation in operations:
+        if attempted >= MAX_EXPLICIT_READS:
+            break
+        attempted += 1
+        results[capability] = await _classified_read(operation)
+    return results, attempted
+
+
 def _safe_lines(results: Mapping[str, str], attempted: int) -> list[str]:
     lines: list[str] = []
     for capability in _CAPABILITIES:
@@ -124,18 +141,7 @@ async def run_canary(
     except Exception:
         return _safe_lines({}, 0), 2
 
-    attempted = 0
-    results: dict[str, str] = {}
-    operations = (
-        ("CONGESTION", lambda: client.congestion_insights([TARGET_CELL])),
-        ("REACHABILITY", lambda: client.device_status([TARGET_DEVICE])),
-        ("LOCATION", lambda: client.location_retrieval([TARGET_DEVICE])),
-    )
-    for capability, operation in operations:
-        if attempted >= MAX_EXPLICIT_READS:
-            break
-        attempted += 1
-        results[capability] = await _classified_read(operation)
+    results, attempted = await run_classified_reads(client)
     return _safe_lines(results, attempted), 0
 
 

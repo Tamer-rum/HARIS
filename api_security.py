@@ -54,6 +54,7 @@ OPERATIONAL_READ_ROUTES = {
 }
 
 CONTROL_IDENTITY_ROUTES = {
+    ("POST", "/api/nac/admin/live-read-canary"),
     ("POST", "/api/nac/autonomous/run"),
     ("POST", "/api/nac/autonomous/field-intervention-demo"),
     ("POST", "/api/nac/autonomous/consent-action"),

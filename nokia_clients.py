@@ -1280,6 +1280,55 @@ FIELD_INTERVENTION_DIAGNOSTIC_STAGES = frozenset({
     "FIELD_RESULT_CONSTRUCTION",
 })
 
+_live_read_canary_lock = asyncio.Lock()
+_live_read_canary_executed = False
+
+
+def _canary_capability_result(classification: str) -> Dict[str, str]:
+    safe = classification if classification in {
+        "SUCCESS", "UNAUTHORIZED", "UNSUPPORTED_IDENTITY", "RATE_LIMITED",
+        "TIMEOUT", "UNAVAILABLE", "ERROR_SANITIZED",
+    } else "ERROR_SANITIZED"
+    return {
+        "classification": safe,
+        "provenance": "NOKIA_LIVE" if safe == "SUCCESS" else "UNAVAILABLE",
+    }
+
+
+@router.post("/admin/live-read-canary")
+async def authenticated_live_read_canary() -> Dict[str, Any]:
+    """One-shot production canary: exactly three classified Nokia reads."""
+    global _live_read_canary_executed
+    if runtime_environment() is not RuntimeEnvironment.PRODUCTION:
+        raise HTTPException(status_code=403, detail="Production live-read canary is unavailable.")
+    settings = get_settings()
+    if not settings.nac_api_token:
+        raise HTTPException(status_code=503, detail="Nokia read configuration is unavailable.")
+    async with _live_read_canary_lock:
+        if _live_read_canary_executed:
+            raise HTTPException(status_code=409, detail="Production live-read canary was already executed.")
+        _live_read_canary_executed = True
+        invocation_settings = settings.model_copy(update={
+            "nac_mode": "live_read_only",
+            "nokia_observation_enabled": False,
+            "enable_continuous_loop": False,
+            "enable_live_write_loop": False,
+        })
+        try:
+            from external.nokia_live_read_canary import run_classified_reads
+            results, attempted = await run_classified_reads(LiveNokiaClient(invocation_settings))
+        except Exception:
+            results = {name: "ERROR_SANITIZED" for name in ("CONGESTION", "REACHABILITY", "LOCATION")}
+            attempted = 0
+    return {
+        "status": "OK",
+        "explicit_reads": attempted,
+        "congestion": _canary_capability_result(results.get("CONGESTION", "UNAVAILABLE")),
+        "reachability": _canary_capability_result(results.get("REACHABILITY", "UNAVAILABLE")),
+        "location": _canary_capability_result(results.get("LOCATION", "UNAVAILABLE")),
+        "provider_mutations": 0,
+    }
+
 
 def _field_intervention_failure(stage: str) -> JSONResponse:
     """Emit only an allowlisted diagnostic category, never exception data."""
