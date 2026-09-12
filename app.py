@@ -2132,6 +2132,53 @@ def render_controls() -> None:
                     st.error("Field intervention could not complete.")
 
     with d:
+        st.markdown("**REAL NOKIA API VALIDATION**")
+        canary_complete = bool(st.session_state.get("real_nokia_canary_completed"))
+        canary_in_progress = bool(st.session_state.get("real_nokia_canary_in_progress"))
+        if st.button(
+            "RUN REAL NOKIA READ CHECK",
+            width="stretch",
+            disabled=canary_complete or canary_in_progress,
+            help="Runs one authenticated backend canary: at most one congestion, one reachability, and one location read.",
+        ):
+            st.session_state.real_nokia_canary_in_progress = True
+            try:
+                payload = run_async(backend_request(
+                    "POST", "/api/nac/admin/live-read-canary"
+                ))
+                st.session_state.real_nokia_canary_result = nokia_canary_presentation(payload)
+                st.session_state.real_nokia_canary_completed = True
+                st.session_state.real_nokia_canary_in_progress = False
+                st.rerun()
+            except Exception:
+                st.session_state.real_nokia_canary_result = {
+                    "backend": "FAILED",
+                    "congestion": {"classification": "UNAVAILABLE", "provenance": "UNAVAILABLE"},
+                    "reachability": {"classification": "UNAVAILABLE", "provenance": "UNAVAILABLE"},
+                    "location": {"classification": "UNAVAILABLE", "provenance": "UNAVAILABLE"},
+                    "provider_mutations": 0,
+                }
+                st.session_state.real_nokia_canary_completed = True
+                st.session_state.real_nokia_canary_in_progress = False
+                logger.warning("Real Nokia read validation failed; details suppressed")
+                st.rerun()
+
+        canary_result = st.session_state.get("real_nokia_canary_result")
+        if isinstance(canary_result, dict):
+            rows = []
+            for label in ("congestion", "reachability", "location"):
+                item = safe_mapping(canary_result.get(label))
+                rows.append(
+                    f'<b>{label.title()}:</b> {safe_text(item.get("classification"), "UNAVAILABLE")} &nbsp; '
+                    f'<b>Source:</b> {safe_text(item.get("provenance"), "UNAVAILABLE")}'
+                )
+            render_html(
+                '<div class="panel"><b>Real Nokia Read Validation</b><br>'
+                f'<b>Backend:</b> {safe_text(canary_result.get("backend"), "FAILED")}<br>'
+                + '<br>'.join(rows)
+                + f'<br><b>Provider Mutations:</b> {safe_text(canary_result.get("provider_mutations"), "0")}</div>'
+            )
+
         elapsed = st.session_state.get("last_elapsed")
 
         if elapsed is not None:
@@ -2149,6 +2196,28 @@ def render_controls() -> None:
             </div>
             """
         )
+
+
+def nokia_canary_presentation(payload: Any) -> Dict[str, Any]:
+    """Reduce the backend canary response to a fixed, non-sensitive UI contract."""
+    source = safe_mapping(payload)
+    allowed = {
+        "SUCCESS", "UNAUTHORIZED", "UNSUPPORTED_IDENTITY", "RATE_LIMITED",
+        "TIMEOUT", "UNAVAILABLE", "ERROR_SANITIZED",
+    }
+    presented: Dict[str, Any] = {"backend": "CONNECTED", "provider_mutations": 0}
+    for name in ("congestion", "reachability", "location"):
+        item = safe_mapping(source.get(name))
+        classification = safe_upper(item.get("classification"), "UNAVAILABLE")
+        if classification not in allowed:
+            classification = "UNAVAILABLE"
+        if classification == "UNSUPPORTED_IDENTITY":
+            classification = "UNSUPPORTED"
+        elif classification in {"RATE_LIMITED", "ERROR_SANITIZED"}:
+            classification = "UNAVAILABLE"
+        provenance = "NOKIA_LIVE" if classification == "SUCCESS" and item.get("provenance") == "NOKIA_LIVE" else "UNAVAILABLE"
+        presented[name] = {"classification": classification, "provenance": provenance}
+    return presented
 
 
 def history_storage_status(memory: Any) -> Dict[str, Any]:

@@ -146,6 +146,37 @@ class FinalFrontendPolishTests(unittest.TestCase):
         self.assertIn('st.session_state.field_demo_cycle', controls)
         self.assertNotIn('st.session_state.last_result = payload.get("cycle"', controls)
 
+    def test_real_nokia_check_is_explicit_authenticated_backend_only(self):
+        controls_start = self.source.index("def render_controls()")
+        controls = self.source[controls_start:self.source.index("def history_storage_status", controls_start)]
+        canary_controls = controls[controls.index('st.markdown("**REAL NOKIA API VALIDATION**")'):]
+        self.assertIn('"RUN REAL NOKIA READ CHECK"', controls)
+        self.assertIn('"POST", "/api/nac/admin/live-read-canary"', controls)
+        self.assertIn("backend_request(", controls)
+        self.assertIn("real_nokia_canary_completed", controls)
+        self.assertIn("real_nokia_canary_in_progress", controls)
+        self.assertNotIn("FixtureNokiaClient", controls)
+        for forbidden in (
+            "request_qos(", "release_qos(", "attach_slice(", "detach_slice(",
+            "create_geofence(", "delete_geofence(", "run_cycle(",
+        ):
+            self.assertNotIn(forbidden, canary_controls)
+
+    def test_real_nokia_check_presentation_is_allowlisted_and_value_blind(self):
+        presented = app.nokia_canary_presentation({
+            "congestion": {"classification": "SUCCESS", "provenance": "NOKIA_LIVE", "coordinates": "secret"},
+            "reachability": {"classification": "UNSUPPORTED_IDENTITY", "provenance": "UNAVAILABLE", "phone": "+999"},
+            "location": {"classification": "unexpected-private-body", "provenance": "NOKIA_LIVE"},
+            "provider_mutations": 99,
+            "token": "secret",
+        })
+        self.assertEqual(presented["backend"], "CONNECTED")
+        self.assertEqual(presented["congestion"], {"classification": "SUCCESS", "provenance": "NOKIA_LIVE"})
+        self.assertEqual(presented["reachability"], {"classification": "UNSUPPORTED", "provenance": "UNAVAILABLE"})
+        self.assertEqual(presented["location"], {"classification": "UNAVAILABLE", "provenance": "UNAVAILABLE"})
+        self.assertEqual(presented["provider_mutations"], 0)
+        self.assertNotIn("secret", str(presented))
+
     def test_fixture_demo_trace_is_explicitly_simulated_and_process_local(self):
         presented = app.fixture_demo_presentation_cycle({
             "trace": [
