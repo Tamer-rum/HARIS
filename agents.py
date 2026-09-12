@@ -378,6 +378,9 @@ class HarisAgentSystem:
         self.engineers = AuthorizedEngineerRegistry(self.settings.authorized_engineer_registry_path)
         self._latest_dispatch: Dict[str, Any] = {}
         self._latest_cycle: Dict[str, Any] = {}
+        # Safe, symbolic progress marker consumed only by the field-demo API
+        # failure boundary.  It never contains provider or identity data.
+        self.field_intervention_diagnostic_stage = "FIELD_CYCLE_EXECUTION"
         register_dispatch_resume_handler(self._resume_pending_dispatch)
         register_dispatch_verification_failure_handler(self._handle_number_verification_failure)
         self._cached_environment: Optional[bool] = None
@@ -1449,6 +1452,7 @@ class HarisAgentSystem:
         pauses the incident instead of inventing an approval or contacting Nokia.
         A later callback records the receipt; a resumed cycle re-enters here.
         """
+        self.field_intervention_diagnostic_stage = "FIELD_ENGINEER_SELECTION"
         incident = state.get("incident", {})
         incident_id = incident.get("incident_id", state.get("cycle_id", "unknown"))
         site = state.get("field_intervention_site") or (incident.get("affected_cells") or ["unknown"])[0]
@@ -1462,6 +1466,7 @@ class HarisAgentSystem:
         engineer = candidates[0]
         base = {"incident_id": incident_id, "engineer_id": engineer.engineer_id, "engineer_name": engineer.name, "masked_phone_number": mask_phone_number(engineer.phone_number), "site": site, "intervention_reason": state.get("field_intervention_reason") or "Physical inspection required.", "evidence_source": "FIXTURE / SIMULATED DEMO" if self.settings.nac_mode == "fixture" else "OPERATIONAL POLICY"}
         if not verified_identities.is_fresh(engineer.phone_number, self.settings.trusted_dispatch_verification_ttl_seconds):
+            self.field_intervention_diagnostic_stage = "FIELD_PENDING_STATE"
             pending = pending_dispatches.create(
                 incident_id=incident_id, engineer_id=engineer.engineer_id, phone_number=engineer.phone_number,
                 site=site, intervention_type="physical_inspection", ttl_seconds=self.settings.trusted_dispatch_verification_ttl_seconds,
@@ -1473,6 +1478,7 @@ class HarisAgentSystem:
                 reason="Fresh Number Verification consent is required before dispatch.", final_dispatch_status="PENDING",
             ))
             try:
+                self.field_intervention_diagnostic_stage = "FIELD_NUMBER_VERIFICATION_START"
                 started = await start_number_verification_for_dispatch(pending, self.settings)
                 # The authorization URL is transient UI handoff only; it is not
                 # written to trace, memory, events, or audit.
@@ -3099,6 +3105,7 @@ class HarisAgentSystem:
         """Fixture-only demo of a physical condition beyond Nokia network APIs."""
         if self.settings.nac_mode != "fixture":
             raise RuntimeError("Field Intervention Demo is available only in FIXTURE mode.")
+        self.field_intervention_diagnostic_stage = "FIELD_CYCLE_EXECUTION"
         return await self.run_cycle(
             dust_advisory=True,
             field_intervention_required=True,

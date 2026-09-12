@@ -1,5 +1,6 @@
 """Mock-only tests for consent-bound pending dispatch continuation."""
 import asyncio
+import logging
 import time
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -217,6 +218,86 @@ class DispatchContinuationTests(unittest.TestCase):
         self.assertEqual(replay.status_code, 403)
         self.assertEqual(wrong.status_code, 403)
         self.assertEqual(refreshed.status_code, 200)
+
+    def test_field_intervention_failures_return_only_allowlisted_stage(self):
+        secret = "sensitive-provider-body-token-phone-99999991000"
+
+        class FailingSystem:
+            settings = AppSettings(nac_mode="fixture")
+            field_intervention_diagnostic_stage = "FIELD_NUMBER_VERIFICATION_START"
+
+            async def run_field_intervention_demo(self):
+                raise RuntimeError(secret)
+
+        with patch("nokia_clients._authoritative_haris_system", return_value=FailingSystem()), \
+                self.assertLogs("haris.nokia", level=logging.ERROR) as captured, \
+                TestClient(api_app) as client:
+            response = client.post(
+                "/api/nac/autonomous/field-intervention-demo",
+                headers=self.api_headers,
+            )
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.json(), {
+            "status": "ERROR",
+            "error": "FIELD_INTERVENTION_INTERNAL_ERROR",
+            "stage": "FIELD_NUMBER_VERIFICATION_START",
+        })
+        evidence = response.text + " ".join(captured.output)
+        self.assertNotIn(secret, evidence)
+        self.assertNotIn("99999991000", evidence)
+
+    def test_field_intervention_system_and_result_failures_are_classified(self):
+        with patch("nokia_clients._authoritative_haris_system", side_effect=RuntimeError("secret")), \
+                TestClient(api_app) as client:
+            construction = client.post(
+                "/api/nac/autonomous/field-intervention-demo", headers=self.api_headers
+            )
+        self.assertEqual(construction.json()["stage"], "FIELD_SYSTEM_CONSTRUCTION")
+
+        class ResultFailure:
+            settings = AppSettings(nac_mode="fixture")
+            field_intervention_diagnostic_stage = "FIELD_CYCLE_EXECUTION"
+            dispatch_authorization_url = None
+
+            async def run_field_intervention_demo(self):
+                return None
+
+            @property
+            def current_dispatch_status(self):
+                raise RuntimeError("oauth-state authorization-url provider-id")
+
+        with patch("nokia_clients._authoritative_haris_system", return_value=ResultFailure()), \
+                TestClient(api_app) as client:
+            result = client.post(
+                "/api/nac/autonomous/field-intervention-demo", headers=self.api_headers
+            )
+        self.assertEqual(result.status_code, 500)
+        self.assertEqual(result.json()["stage"], "FIELD_RESULT_CONSTRUCTION")
+        self.assertNotIn("oauth-state", result.text)
+
+    def test_valid_field_intervention_block_states_remain_http_200(self):
+        for status in ("WAITING_FOR_IDENTITY_VERIFICATION", "BLOCKED", "NO_ELIGIBLE_ENGINEER"):
+            class BusinessSystem:
+                settings = AppSettings(nac_mode="fixture")
+                dispatch_authorization_url = None
+                current_dispatch_status = {
+                    "incident_id": "incident-safe", "decision": "BLOCK", "status": status,
+                }
+                current_cycle_status = {
+                    "final_status": "waiting_for_identity_verification",
+                    "trusted_dispatch": current_dispatch_status,
+                }
+
+                async def run_field_intervention_demo(self):
+                    return None
+
+            with self.subTest(status=status), \
+                    patch("nokia_clients._authoritative_haris_system", return_value=BusinessSystem()), \
+                    TestClient(api_app) as client:
+                response = client.post(
+                    "/api/nac/autonomous/field-intervention-demo", headers=self.api_headers
+                )
+            self.assertEqual(response.status_code, 200)
 
     def test_backend_authoritative_standard_run_uses_shared_system_and_sanitizes_cycle(self):
         class BackendSystem:

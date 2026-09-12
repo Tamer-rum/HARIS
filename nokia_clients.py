@@ -1274,6 +1274,32 @@ class _AutonomousDemoIdempotency:
 
 autonomous_demo_idempotency = _AutonomousDemoIdempotency()
 
+FIELD_INTERVENTION_DIAGNOSTIC_STAGES = frozenset({
+    "FIELD_SYSTEM_CONSTRUCTION",
+    "FIELD_CYCLE_EXECUTION",
+    "FIELD_ENGINEER_SELECTION",
+    "FIELD_PENDING_STATE",
+    "FIELD_NUMBER_VERIFICATION_START",
+    "FIELD_RESULT_CONSTRUCTION",
+})
+
+
+def _field_intervention_failure(stage: str) -> JSONResponse:
+    """Emit only an allowlisted diagnostic category, never exception data."""
+    safe_stage = (
+        stage if stage in FIELD_INTERVENTION_DIAGNOSTIC_STAGES
+        else "FIELD_CYCLE_EXECUTION"
+    )
+    logger.error("FIELD_INTERVENTION_FAILURE stage=%s", safe_stage)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "status": "ERROR",
+            "error": "FIELD_INTERVENTION_INTERNAL_ERROR",
+            "stage": safe_stage,
+        },
+    )
+
 
 async def start_number_verification_for_dispatch(pending: PendingDispatch, settings: Optional[AppSettings] = None) -> Dict[str, str]:
     """Start the existing Nokia SDK OAuth flow, bound to one pending dispatch."""
@@ -1357,18 +1383,31 @@ async def incident_replay(cycle_id: str) -> Dict[str, Any]:
 
 
 @router.post("/autonomous/field-intervention-demo")
-async def authoritative_field_intervention_demo() -> Dict[str, Any]:
+async def authoritative_field_intervention_demo() -> Any:
     """Fixture-only backend-owned dispatch demo; no caller selects trust inputs."""
-    system = _authoritative_haris_system()
+    try:
+        system = _authoritative_haris_system()
+    except HTTPException:
+        raise
+    except Exception:
+        return _field_intervention_failure("FIELD_SYSTEM_CONSTRUCTION")
     if system.settings.nac_mode != "fixture":
         raise HTTPException(status_code=403, detail="Field Intervention Demo is available only in FIXTURE mode.")
-    await system.run_field_intervention_demo()
-    dispatch = system.current_dispatch_status
-    action_token = None
-    if dispatch.get("pending_id") and system.dispatch_authorization_url:
-        action_token = frontend_consent_tokens.issue(dispatch["pending_id"])
-    workflow_token = frontend_workflow_sessions.issue(dispatch["incident_id"]) if dispatch.get("incident_id") else None
-    return {"cycle": system.current_cycle_status, "consent_action_token": action_token, "workflow_session_token": workflow_token}
+    try:
+        await system.run_field_intervention_demo()
+    except Exception:
+        return _field_intervention_failure(
+            getattr(system, "field_intervention_diagnostic_stage", "FIELD_CYCLE_EXECUTION")
+        )
+    try:
+        dispatch = system.current_dispatch_status
+        action_token = None
+        if dispatch.get("pending_id") and system.dispatch_authorization_url:
+            action_token = frontend_consent_tokens.issue(dispatch["pending_id"])
+        workflow_token = frontend_workflow_sessions.issue(dispatch["incident_id"]) if dispatch.get("incident_id") else None
+        return {"cycle": system.current_cycle_status, "consent_action_token": action_token, "workflow_session_token": workflow_token}
+    except Exception:
+        return _field_intervention_failure("FIELD_RESULT_CONSTRUCTION")
 
 
 @router.post("/autonomous/run")

@@ -244,6 +244,25 @@ class ApiSecurityTests(unittest.TestCase):
         self.assertEqual(headers["Authorization"], f"Bearer {TOKEN}")
         self.assertEqual(headers["Idempotency-Key"], "opaque-request-key-1234")
 
+    def test_streamlit_accepts_only_allowlisted_field_diagnostic(self):
+        configured = self.settings.model_copy(update={"haris_backend_url": "https://backend.invalid"})
+        response = MagicMock(status_code=500)
+        response.json.return_value = {
+            "status": "ERROR", "error": "FIELD_INTERVENTION_INTERNAL_ERROR",
+            "stage": "FIELD_CYCLE_EXECUTION", "detail": "must-not-be-rendered",
+        }
+        async_client = AsyncMock()
+        async_client.__aenter__.return_value.request.return_value = response
+        async_client.__aexit__.return_value = None
+        with patch.object(streamlit_app, "settings", configured), \
+                patch("httpx.AsyncClient", return_value=async_client), \
+                self.assertRaises(streamlit_app.BackendSafeDiagnosticError) as raised:
+            asyncio.run(streamlit_app.backend_request(
+                "POST", "/api/nac/autonomous/field-intervention-demo"
+            ))
+        self.assertEqual(raised.exception.stage, "FIELD_CYCLE_EXECUTION")
+        self.assertNotIn("must-not-be-rendered", str(raised.exception))
+
     def test_isolated_autonomous_endpoint_is_idempotent_and_fixture_only(self):
         system = MagicMock()
         system.settings = self.settings

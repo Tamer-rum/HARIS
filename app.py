@@ -742,6 +742,14 @@ class BackendAuthenticationConfigurationError(RuntimeError):
     """Safe operator-facing error for a missing Streamlit backend credential."""
 
 
+class BackendSafeDiagnosticError(RuntimeError):
+    """Allowlisted backend diagnostic safe for operator presentation."""
+
+    def __init__(self, stage: str):
+        super().__init__("FIELD_INTERVENTION_INTERNAL_ERROR")
+        self.stage = stage
+
+
 def run_async(coro):
     """Run an async HARIS operation from Streamlit's synchronous UI."""
     try:
@@ -779,6 +787,21 @@ async def backend_request(
     })
     async with httpx.AsyncClient(timeout=10.0) as http:
         response = await http.request(method, f"{base}{path}", json=payload, headers=headers)
+        if response.status_code == 500 and path == "/api/nac/autonomous/field-intervention-demo":
+            try:
+                diagnostic = response.json()
+            except Exception:
+                diagnostic = {}
+            allowed_stages = {
+                "FIELD_SYSTEM_CONSTRUCTION", "FIELD_CYCLE_EXECUTION",
+                "FIELD_ENGINEER_SELECTION", "FIELD_PENDING_STATE",
+                "FIELD_NUMBER_VERIFICATION_START", "FIELD_RESULT_CONSTRUCTION",
+            }
+            if (
+                diagnostic.get("error") == "FIELD_INTERVENTION_INTERNAL_ERROR"
+                and diagnostic.get("stage") in allowed_stages
+            ):
+                raise BackendSafeDiagnosticError(diagnostic["stage"])
         response.raise_for_status()
         return response.json()
 
@@ -1991,6 +2014,10 @@ def render_controls() -> None:
                     )
                     st.rerun()
 
+                except BackendSafeDiagnosticError as exc:
+                    logger.warning("HARIS field intervention demo failed at safe stage=%s", exc.stage)
+                    st.error("Field intervention could not complete.")
+                    st.caption(f"Diagnostic stage: {exc.stage}")
                 except Exception:
                     st.session_state.fixture_demo_in_progress = False
                     logger.warning("HARIS cycle failed; details suppressed")
