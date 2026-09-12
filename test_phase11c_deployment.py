@@ -39,7 +39,13 @@ class ProductionDeploymentContractTests(unittest.TestCase):
         self.assertIn("healthCheckPath: /api/platform/health", manifest)
         self.assertIn("value: production", manifest)
         self.assertIn("value: postgres", manifest)
-        self.assertIn("value: fixture", manifest)
+        self.assertIn("value: live_read_only", manifest)
+        self.assertIn("key: NOKIA_OBSERVATION_ENABLED", manifest)
+        self.assertIn('value: "30"', manifest)
+        self.assertIn('value: "60"', manifest)
+        self.assertIn('value: "180"', manifest)
+        self.assertIn("key: ENABLE_CONTINUOUS_LOOP", manifest)
+        self.assertIn("key: ENABLE_LIVE_WRITE_LOOP", manifest)
         self.assertIn("workers=1", source)
 
     def test_backend_failure_marks_cached_authority_stale_and_not_ready(self):

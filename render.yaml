@@ -20,6 +20,20 @@ services:
       - key: HARIS_OPERATIONAL_API_TOKEN
         sync: false
       - key: NAC_MODE
-        value: fixture
+        value: live_read_only
+      - key: NOKIA_OBSERVATION_ENABLED
+        value: "true"
+      - key: NOKIA_CONGESTION_INTERVAL_SECONDS
+        value: "30"
+      - key: NOKIA_REACHABILITY_INTERVAL_SECONDS
+        value: "60"
+      - key: NOKIA_LOCATION_INTERVAL_SECONDS
+        value: "180"
+      - key: NOKIA_OBSERVATION_TIMEOUT_SECONDS
+        value: "2"
+      - key: NOKIA_OBSERVATION_MAX_BACKOFF_SECONDS
+        value: "60"
       - key: ENABLE_CONTINUOUS_LOOP
+        value: "false"
+      - key: ENABLE_LIVE_WRITE_LOOP
         value: "false"
