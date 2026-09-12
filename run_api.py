@@ -506,6 +506,16 @@ def _durable_supervisory_status(system=None) -> dict:
     persistence phase.
     """
     settings = get_settings()
+    observation_store = get_observation_store()
+    runtime_client = observation_store.client
+    observation_status = observation_store.status()
+    runtime_status = {
+        "nac_mode": settings.nac_mode,
+        "nokia_client": runtime_client.name,
+        "observation": observation_status,
+        "capabilities": runtime_client.capability_report(),
+        "authority": "BACKEND_RUNTIME",
+    }
     production_or_live = (
         runtime_environment() is RuntimeEnvironment.PRODUCTION
         or settings.nac_mode in {"live_read_only", "live_write"}
@@ -518,6 +528,7 @@ def _durable_supervisory_status(system=None) -> dict:
             "dispatch_history": [],
             "trusted_dispatch_authority": "PROCESS_LOCAL_SINGLE_INSTANCE",
             "authority": "DURABLE_REPOSITORY", "persistence": _platform_lifecycle.public_status(),
+            "runtime": runtime_status,
         }
 
     snapshot = _authoritative_snapshot()
@@ -602,6 +613,7 @@ def _durable_supervisory_status(system=None) -> dict:
         "trusted_dispatch_authority": "PROCESS_LOCAL_SINGLE_INSTANCE",
         "authority": "DURABLE_REPOSITORY",
         "persistence": _platform_lifecycle.public_status(),
+        "runtime": runtime_status,
     })
 
 

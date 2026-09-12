@@ -196,13 +196,41 @@ def authoritative_haris_state(result: Optional[Dict[str, Any]], supervisory: Opt
     )
 
 
-def presentation_mode_label() -> str:
+def authoritative_runtime_context(supervisory: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Return backend runtime truth; never substitute Streamlit-local fixture state."""
+    runtime = safe_mapping(safe_mapping(supervisory).get("runtime"))
+    if runtime:
+        st.session_state.backend_runtime_status = runtime
+        return runtime
+    cached = safe_mapping(st.session_state.get("backend_runtime_status"))
+    if settings.haris_backend_url:
+        return cached or {
+            "nac_mode": "unavailable",
+            "nokia_client": "UNAVAILABLE",
+            "observation": {"connection_status": "DISCONNECTED", "source": "UNAVAILABLE"},
+            "authority": "BACKEND_UNAVAILABLE",
+        }
+    return {
+        "nac_mode": settings.nac_mode,
+        "nokia_client": get_system().client.name,
+        "observation": {},
+        "authority": "LOCAL_RUNTIME",
+    }
+
+
+def operational_nac_mode(supervisory: Optional[Dict[str, Any]] = None) -> str:
+    return str(authoritative_runtime_context(supervisory).get("nac_mode") or "unavailable")
+
+
+def presentation_mode_label(supervisory: Optional[Dict[str, Any]] = None) -> str:
     """Compact truthful label that does not clip on the judge-facing header."""
+    mode = operational_nac_mode(supervisory)
     return {
         "fixture": "FIXTURE / DEMO",
         "live_read_only": "LIVE / READ-ONLY",
         "live_write": "LIVE / WRITE ENABLED",
-    }.get(settings.nac_mode, safe_upper(settings.nac_mode, "UNKNOWN"))
+        "unavailable": "UNAVAILABLE",
+    }.get(mode, safe_upper(mode, "UNKNOWN"))
 
 
 def overview_notifications(result: Optional[Dict[str, Any]], supervisory: Optional[Dict[str, Any]] = None) -> List[Tuple[str, str, str]]:
@@ -1023,7 +1051,7 @@ def render_header(result: Optional[Dict[str, Any]], supervisory: Optional[Dict[s
         """
     )
 
-    if settings.nac_mode == "live_read_only":
+    if operational_nac_mode(supervisory) == "live_read_only":
         st.info(
             "LIVE NOKIA TELEMETRY · NETWORK WRITES DISABLED — remediation is proposed and audited, never executed.",
             icon="ℹ️",
@@ -1034,10 +1062,15 @@ def render_header(result: Optional[Dict[str, Any]], supervisory: Optional[Dict[s
 # Environmental state
 # ============================================================================
 
-def render_capability_matrix(result: Optional[Dict[str, Any]]) -> None:
+def render_capability_matrix(
+    result: Optional[Dict[str, Any]],
+    supervisory: Optional[Dict[str, Any]] = None,
+) -> None:
     """Display WARDEN's one shared capability assessment."""
     report = safe_mapping(safe_mapping(result).get("warden")).get("capability_report")
     if not report:
+        report = safe_mapping(authoritative_runtime_context(supervisory).get("capabilities"))
+    if not report and not settings.haris_backend_url:
         report = get_system().client.capability_report()
 
     labels = [
@@ -2012,7 +2045,7 @@ def render_controls() -> None:
     with a:
         fixture_demo_complete = bool(st.session_state.get("fixture_demo_completed"))
         fixture_demo_in_progress = bool(st.session_state.get("fixture_demo_in_progress"))
-        if st.button(
+        if operational_nac_mode() == "fixture" and st.button(
             "RUN AUTONOMOUS HARIS",
             width="stretch",
             type="primary",
@@ -2066,7 +2099,7 @@ def render_controls() -> None:
     with b:
         field_demo_complete = bool(st.session_state.get("field_demo_completed"))
         field_demo_in_progress = bool(st.session_state.get("field_demo_in_progress"))
-        if settings.nac_mode == "fixture" and st.button(
+        if operational_nac_mode() == "fixture" and st.button(
             "RUN FIELD INTERVENTION DEMO",
             width="stretch",
             help="SIMULATED FIXTURE evidence: a tower power condition requires privileged physical intervention.",
@@ -2190,7 +2223,7 @@ def render_controls() -> None:
             f"""
             <div class="small-note">
                 <b style="color:#8ca5bd;">{timing}</b><br>
-                {"Fixture mode is deterministic and demo-safe." if settings.nac_mode == "fixture" else "Live Nokia telemetry is read-only; no network mutation will be attempted."}
+                {"Fixture mode is deterministic and demo-safe." if operational_nac_mode() == "fixture" else "Live Nokia telemetry is read-only; no network mutation will be attempted."}
                 Tower status and KPI values come from HARIS state/readback.
                 The topology visualizes the logical network fabric.
             </div>
@@ -2360,6 +2393,7 @@ def render_status_bar(result: Optional[Dict[str, Any]], supervisory: Optional[Di
     warden = safe_mapping(cycle.get("warden"))
     dispatch = safe_mapping(cycle.get("trusted_dispatch"))
     haris_state = authoritative_haris_state(cycle, supervisory)
+    runtime = authoritative_runtime_context(supervisory)
     warden_state = (
         "PENDING" if dispatch.get("status") == "WAITING_FOR_IDENTITY_VERIFICATION"
         else "BLOCKED" if dispatch.get("decision") == "BLOCK"
@@ -2367,8 +2401,8 @@ def render_status_bar(result: Optional[Dict[str, Any]], supervisory: Optional[Di
     )
     states = [
         ("SYSTEM STATUS", haris_state),
-        ("NOKIA NaC", safe_upper(get_system().client.name, "UNAVAILABLE")),
-        ("MODE", presentation_mode_label()),
+        ("NOKIA NaC", safe_upper(runtime.get("nokia_client"), "UNAVAILABLE")),
+        ("MODE", presentation_mode_label(supervisory)),
         ("WARDEN", warden_state),
         ("ACTIVE INCIDENT", incident.get("incident_id") or "NONE"),
     ]
@@ -2395,10 +2429,11 @@ def render_overview(result: Optional[Dict[str, Any]], supervisory: Optional[Dict
     cols = st.columns(5)
     backend_value = "CONNECTED" if settings.haris_backend_url and supervisory else "UNAVAILABLE" if settings.haris_backend_url else "LOCAL"
     dispatch = safe_mapping(cycle.get("trusted_dispatch"))
+    runtime = authoritative_runtime_context(supervisory)
     warden_value = "PENDING" if dispatch.get("status") == "WAITING_FOR_IDENTITY_VERIFICATION" else "APPROVED" if warden.get("verified") else "REVIEW"
     cards = [
         ("Backend Health", backend_value, "Authoritative backend supervision" if settings.haris_backend_url else "Local fixture console", "server"),
-        ("Nokia Integration", safe_upper(get_system().client.name, "UNAVAILABLE"), presentation_mode_label(), "nokia"),
+        ("Nokia Integration", safe_upper(runtime.get("nokia_client"), "UNAVAILABLE"), presentation_mode_label(supervisory), "nokia"),
         ("WARDEN", warden_value, dispatch.get("reason") or "Safety authority state", "shield"),
         ("Active Incident", incident.get("incident_id") or "NONE", ", ".join(incident.get("affected_cells") or []) or "No active incident", "radar"),
         ("Predicted Risk", safe_upper(prediction.get("predicted_risk_level"), "MONITORING"), "Authoritative forecast state" if prediction else "No active forecast", "risk"),
@@ -2425,7 +2460,7 @@ def render_overview(result: Optional[Dict[str, Any]], supervisory: Optional[Dict
             f'<div class="cycle-panel">{render_svg_icon("cycle", "cycle-icon")}<div><div class="cycle-panel-label">CURRENT CYCLE STATE</div>'
             f'<div class="cycle-panel-value">{safe_text(cycle_detail)}<br>Current cycle state: <b>{safe_text(current_state)}</b></div></div></div>'
         )
-    render_capability_matrix(result)
+    render_capability_matrix(result, supervisory)
 
 
 def render_network_intelligence(result: Optional[Dict[str, Any]]) -> None:
@@ -2461,7 +2496,11 @@ def render_observation_monitor() -> None:
         status = safe_mapping(payload.get("status"))
         observation = safe_mapping(payload.get("observation"))
         state = safe_upper(status.get("connection_status"), "DISCONNECTED")
-        heading = "FIXTURE / SIMULATED MONITORING" if status.get("mode") == "fixture" else "NOKIA LIVE MONITORING"
+        mode = str(status.get("mode") or "unavailable")
+        heading = {
+            "fixture": "FIXTURE / SIMULATED MONITORING",
+            "live_read_only": "NOKIA / CAMARA LIVE MONITORING",
+        }.get(mode, "MONITORING UNAVAILABLE")
         last = status.get("last_success_at")
         last_text = time.strftime("%H:%M:%S", time.localtime(last)) if isinstance(last, (int, float)) else "N/A"
         next_at = status.get("next_poll_at")
@@ -2473,11 +2512,17 @@ def render_observation_monitor() -> None:
                 time.strftime("%H:%M:%S", time.localtime(safe_mapping(item).get("next_due_at"))) if isinstance(safe_mapping(item).get("next_due_at"), (int, float)) else "N/A",
             ) for name, item in safe_mapping(status.get("capabilities")).items()
         ) or "No capability evidence yet."
+        proven_source = (
+            observation.get("source") or status.get("source")
+            if status.get("last_success_at") else "UNAVAILABLE"
+        )
+        freshness = "FRESH" if state == "CONNECTED" else "STALE" if status.get("last_success_at") else "UNAVAILABLE"
         render_html(
             f'<div class="cycle-panel"><div><div class="cycle-panel-label">{safe_text(heading)}</div>'
             f'<div class="cycle-panel-value"><b>{safe_text(state)}</b> · Polling interval: '
             f'{safe_text(status.get("interval_seconds"))}s · Last successful read: {safe_text(last_text)} · '
-            f'Next scheduled read: {safe_text(next_text)}<br>{safe_text(capability_text)}<br>Source: {safe_text(observation.get("source") or status.get("source"), "N/A")}</div></div></div>'
+            f'Next scheduled read: {safe_text(next_text)}<br>{safe_text(capability_text)}<br>'
+            f'Source: {safe_text(proven_source, "UNAVAILABLE")} Â· Freshness: {safe_text(freshness)}</div></div></div>'
         )
         if previous is not None and previous != fingerprint:
             st.rerun(scope="app")

@@ -25,6 +25,40 @@ class FinalFrontendPolishTests(unittest.TestCase):
         self.assertIn("height:180px", self.source)
         self.assertIn("min-height:180px", self.source)
 
+    def test_backend_runtime_mode_overrides_streamlit_fixture_default(self):
+        supervisory = {
+            "runtime": {
+                "nac_mode": "live_read_only",
+                "nokia_client": "NOKIA_LIVE",
+                "observation": {
+                    "enabled": True,
+                    "running": True,
+                    "connection_status": "CONNECTED",
+                    "source": "NOKIA_LIVE",
+                },
+                "authority": "BACKEND_RUNTIME",
+            }
+        }
+        self.assertEqual(app.presentation_mode_label(supervisory), "LIVE / READ-ONLY")
+        self.assertEqual(app.authoritative_runtime_context(supervisory)["nokia_client"], "NOKIA_LIVE")
+
+    def test_deployed_runtime_failure_never_falls_back_to_fixture(self):
+        original = app.settings
+        try:
+            app.settings = AppSettings(
+                nac_mode="fixture",
+                fixture_dir="fixtures",
+                haris_backend_url="https://backend.invalid",
+                haris_backend_api_token="configured-for-test",
+            )
+            app.st.session_state.pop("backend_runtime_status", None)
+            runtime = app.authoritative_runtime_context({})
+            self.assertEqual(runtime["nac_mode"], "unavailable")
+            self.assertEqual(runtime["nokia_client"], "UNAVAILABLE")
+            self.assertEqual(app.presentation_mode_label({}), "UNAVAILABLE")
+        finally:
+            app.settings = original
+
     def test_02_operational_decoration_is_below_text_content(self):
         self.assertIn(".ops-card-content { position:relative; z-index:2", self.source)
         self.assertIn(".ops-card-motif { z-index:0", self.source)

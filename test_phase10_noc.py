@@ -209,6 +209,11 @@ class Phase10DurableNocTests(unittest.TestCase):
         self.assertEqual(status["incident_history"][0]["final_truth"], "REAL_PARTIAL")
         self.assertTrue(status["timeline"])
         self.assertNotIn("provider-secret-id", repr(status))
+        self.assertEqual(status["runtime"]["nac_mode"], self.configured.nac_mode)
+        self.assertEqual(status["runtime"]["authority"], "BACKEND_RUNTIME")
+        self.assertIn("observation", status["runtime"])
+        self.assertIn("enabled", status["runtime"]["observation"])
+        self.assertIn("running", status["runtime"]["observation"])
 
     def test_live_capability_truth_contract_is_explicit(self):
         from nokia_clients import LiveNokiaClient
