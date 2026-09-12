@@ -209,6 +209,49 @@ class FinalFrontendPolishTests(unittest.TestCase):
         }
         self.assertEqual(app.protected_tier1_count(cycle), "1")
 
+    def test_live_topology_refresh_tracks_t03_to_t05_transition(self):
+        first = {
+            "T03": {"nokia_congestion": "High", "freshness": "FRESH", "source": "NOKIA_LIVE"},
+            "T05": {"nokia_congestion": "Low", "freshness": "FRESH", "source": "NOKIA_LIVE"},
+        }
+        second = {
+            "T03": {"nokia_congestion": "Low", "freshness": "FRESH", "source": "NOKIA_LIVE"},
+            "T05": {"nokia_congestion": "High", "freshness": "FRESH", "source": "NOKIA_LIVE"},
+        }
+        first_svg, second_svg = app.topology_svg(first, False), app.topology_svg(second, False)
+        self.assertIn("T03</text>", first_svg)
+        self.assertIn("NOKIA: HIGH / HARIS: INCIDENT_OPEN / NOKIA LIVE", first_svg)
+        self.assertIn("NOKIA: LOW / HARIS: STABLE / NOKIA LIVE", second_svg)
+        self.assertIn("NOKIA: HIGH / HARIS: INCIDENT_OPEN / NOKIA LIVE", second_svg)
+        self.assertNotEqual(first_svg, second_svg)
+
+    def test_live_topology_supports_multiple_affected_configured_towers(self):
+        svg = app.topology_svg({
+            "T03": {"nokia_congestion": "High", "freshness": "FRESH", "source": "NOKIA_LIVE"},
+            "T05": {"nokia_congestion": "High", "freshness": "FRESH", "source": "NOKIA_LIVE"},
+        }, False)
+        self.assertEqual(svg.count("NOKIA: HIGH / HARIS: INCIDENT_OPEN / NOKIA LIVE"), 2)
+
+    def test_stale_or_unavailable_topology_evidence_is_never_fresh(self):
+        for freshness in ("STALE", "UNAVAILABLE"):
+            entity = {"nokia_congestion": "High", "freshness": freshness, "source": "NOKIA_LIVE"}
+            self.assertIsNone(app.current_network_level(entity))
+            svg = app.topology_svg({"T03": entity}, False)
+            self.assertIn(f"NOKIA: UNAVAILABLE / HARIS: STALE / NOKIA LIVE", svg)
+            self.assertNotIn("NOKIA: HIGH / HARIS: INCIDENT_OPEN", svg)
+
+    def test_topology_auto_refresh_is_bounded_and_does_not_trigger_execution(self):
+        section_start = self.source.index("@st.fragment(run_every=3)\ndef render_network_section")
+        section = self.source[section_start:self.source.index("# KPI impact", section_start)]
+        self.assertIn("authoritative_network_entities(result)", section)
+        self.assertIn("topology_svg(data=data, active=False)", section)
+        for forbidden in (
+            "/api/nac/autonomous/run", "run_cycle(", "run_field_intervention_demo(",
+            "request_qos(", "attach_slice(", "create_geofence(", "public_dust_feed_url",
+            "gemini", "groq", "crewai",
+        ):
+            self.assertNotIn(forbidden, section.lower())
+
 
 if __name__ == "__main__":
     unittest.main()

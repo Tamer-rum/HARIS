@@ -1145,6 +1145,16 @@ def render_prediction(result: Optional[Dict[str, Any]]) -> None:
 # Network topology SVG
 # ============================================================================
 
+
+def current_network_level(entity: Dict[str, Any]) -> Optional[str]:
+    """Return categorical congestion only when authoritative evidence is current."""
+    freshness = safe_upper(entity.get("freshness"), "")
+    if freshness in {"STALE", "UNAVAILABLE"}:
+        return None
+    level = entity.get("nokia_congestion") or entity.get("congestion_level")
+    return level if level in {"None", "Low", "Medium", "High"} else None
+
+
 def topology_svg(
     data: Dict[str, Dict[str, Any]],
     active: bool,
@@ -1179,7 +1189,7 @@ def topology_svg(
         x1, y1 = positions[source]
         x2, y2 = positions[target]
 
-        levels = [data.get(source, {}).get("nokia_congestion") or data.get(source, {}).get("congestion_level"), data.get(target, {}).get("nokia_congestion") or data.get(target, {}).get("congestion_level")]
+        levels = [current_network_level(data.get(source, {})), current_network_level(data.get(target, {}))]
         level = max((item for item in levels if item in {"None", "Low", "Medium", "High"}), key=lambda item: {"None": 0, "Low": 1, "Medium": 2, "High": 3}[item], default=None)
         color = {"High": "#ff4d5f", "Medium": "#ffc857", "Low": "#31d7ff", "None": "#42f59b"}.get(level, "#7890aa")
 
@@ -1207,7 +1217,7 @@ def topology_svg(
             sub = "NETWORK CORE"
         else:
             entity = data.get(name, {})
-            level = entity.get("nokia_congestion") or entity.get("congestion_level")
+            level = current_network_level(entity)
             status = entity.get("haris_state") or ("INCIDENT_OPEN" if level == "High" else "WATCHING" if level == "Medium" else "STABLE" if level in {"Low", "None"} else "STALE")
             key = {"High": "red", "Medium": "yellow", "Low": "green", "None": "green"}.get(level, "gray")
 
@@ -1406,6 +1416,7 @@ def authoritative_network_entities(result: Optional[Dict[str, Any]]) -> Dict[str
     source = "FIXTURE_SIMULATED" if settings.nac_mode == "fixture" else "UNAVAILABLE"
     return {cell: {"entity_id": cell, "nokia_congestion": values.get("congestion_level"), "haris_state": "INCIDENT_OPEN" if values.get("congestion_level") == "High" else "WATCHING" if values.get("congestion_level") == "Medium" else "STABLE", "source": source, "source_type": "HARIS_CONFIGURED_LOGICAL_CELL"} for cell, values in rows.items()}
 
+@st.fragment(run_every=3)
 def render_network_section(
     result: Optional[Dict[str, Any]],
 ) -> None:
@@ -1422,7 +1433,8 @@ def render_network_section(
         rows = ""
 
         for cell_id, values in sorted(data.items()):
-            level = values.get("nokia_congestion") or values.get("congestion_level")
+            freshness = safe_upper(values.get("freshness"), "")
+            level = current_network_level(values)
 
             if level in {"High", "Medium"}:
                 status_class = "badge-red" if level == "High" else "badge-yellow"
@@ -1434,6 +1446,16 @@ def render_network_section(
                     <span><b>{cell_id}</b> · congestion</span>
                     <span class="badge {status_class}">
                     {evidence} · HARIS {status}
+                    </span>
+                </div>
+                """
+
+            elif freshness in {"STALE", "UNAVAILABLE"}:
+                rows += f"""
+                <div class="row">
+                    <span><b>{cell_id}</b> Â· congestion</span>
+                    <span class="badge badge-gray">
+                    NOKIA {freshness} Â· HARIS STALE
                     </span>
                 </div>
                 """
