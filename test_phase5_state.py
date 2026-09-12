@@ -42,6 +42,23 @@ class PhaseFiveStateTests(unittest.TestCase):
         self.assertEqual(entities["T05"]["haris_state"], "INCIDENT_OPEN")
         self.assertEqual(entities["T05"]["source"], "NOKIA_LIVE")
 
+    def test_one_device_location_updates_only_its_observed_cell(self):
+        registry = NetworkStateRegistry(mode="live_read_only")
+        registry.ingest({
+            "observed_at": time.time(), "mode": "live_read_only", "source": "live",
+            "congestion": [
+                {"cell_id": "T03", "congestion_level": "Low"},
+                {"cell_id": "T05", "congestion_level": "Low"},
+            ],
+            "devices": [
+                {"device_id": "ambulance-01", "cell_id": "T03", "reachable": True},
+            ],
+            "locations": [{"device_id": "ambulance-01"}],
+        })
+        entities = registry.snapshot()["entities"]
+        self.assertIs(entities["T03"]["location_available"], True)
+        self.assertIsNone(entities["T05"]["location_available"])
+
     def test_repeated_high_deduplicates_and_two_cells_are_independent(self):
         async def exercise():
             registry = NetworkStateRegistry(mode="live_read_only")

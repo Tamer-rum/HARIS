@@ -9,6 +9,12 @@ from nokia_clients import LiveNokiaClient
 
 
 class NokiaQodContractTests(unittest.TestCase):
+    def test_provider_field_normalizer_supports_dict_and_sdk_models(self):
+        model = SimpleNamespace(congestion_level="High")
+        self.assertEqual(LiveNokiaClient._provider_field(model, "congestion_level", "congestionLevel"), "High")
+        self.assertEqual(LiveNokiaClient._provider_field({"congestionLevel": "Low"}, "congestion_level", "congestionLevel"), "Low")
+        self.assertIsNone(LiveNokiaClient._provider_field({}, "missingField", "missing_field"))
+
     def test_qod_creation_is_constructed_without_live_mutation(self):
         settings = AppSettings(
             nac_mode="live_write", nac_api_token="test-token",

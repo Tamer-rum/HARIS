@@ -300,6 +300,10 @@ class AppSettings(BaseSettings):
         "ambulance-01", "scada-01", "pipeline-01", "dispatch-01",
         "sensor-01", "fleet-01", "fleet-02", "telemetry-01",
     ])
+    # Bound automatic live reads to identities proven by the guarded canary.
+    # Other logical topology nodes remain configured metadata until supported.
+    nokia_observation_cell_ids: List[str] = Field(default_factory=lambda: ["T03"])
+    nokia_observation_device_ids: List[str] = Field(default_factory=lambda: ["ambulance-01"])
 
     quality_matrix: QualityMatrix = Field(default_factory=QualityMatrix)
     guardrails: Guardrails = Field(default_factory=Guardrails)
