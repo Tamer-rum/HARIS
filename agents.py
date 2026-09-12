@@ -1477,6 +1477,22 @@ class HarisAgentSystem:
                 intervention_type="physical_inspection", verification_status="WAITING_FOR_IDENTITY_VERIFICATION",
                 reason="Fresh Number Verification consent is required before dispatch.", final_dispatch_status="PENDING",
             ))
+            if state.get("isolated_fixture_demo"):
+                # Demonstrate the fail-closed consent gate without starting
+                # Nokia OAuth. Real Trusted Dispatch continues below.
+                self._latest_dispatch = {
+                    **base,
+                    "pending_id": pending.pending_id,
+                    "decision": "BLOCK",
+                    "status": "WAITING_FOR_IDENTITY_VERIFICATION",
+                    "number_verified": False,
+                    "recent_sim_swap": None,
+                    "reason": "Identity verification is required; real provider authorization was not executed in the fixture demo.",
+                    "provider_authorization_executed": False,
+                    "provenance": "SIMULATED",
+                    "authority": "PROCESS_LOCAL_FIXTURE_DEMO",
+                }
+                return self.current_dispatch_status
             try:
                 self.field_intervention_diagnostic_stage = "FIELD_NUMBER_VERIFICATION_START"
                 started = await start_number_verification_for_dispatch(pending, self.settings)

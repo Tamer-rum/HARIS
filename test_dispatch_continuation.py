@@ -180,6 +180,7 @@ class DispatchContinuationTests(unittest.TestCase):
     def test_backend_authority_uses_one_time_consent_handoff_not_public_status(self):
         class BackendSystem:
             settings = AppSettings(nac_mode="fixture")
+            client = FixtureNokiaClient(settings)
             dispatch_authorization_url = "https://nokia.example/consent"
             current_cycle_status = {
                 "final_status": "waiting_for_identity_verification",
@@ -231,6 +232,7 @@ class DispatchContinuationTests(unittest.TestCase):
 
         class FailingSystem:
             settings = AppSettings(nac_mode="fixture")
+            client = FixtureNokiaClient(settings)
             field_intervention_diagnostic_stage = "FIELD_NUMBER_VERIFICATION_START"
 
             async def run_field_intervention_demo(self, *, isolated_fixture_demo=False):
@@ -264,6 +266,7 @@ class DispatchContinuationTests(unittest.TestCase):
 
         class ResultFailure:
             settings = AppSettings(nac_mode="fixture")
+            client = FixtureNokiaClient(settings)
             field_intervention_diagnostic_stage = "FIELD_CYCLE_EXECUTION"
             dispatch_authorization_url = None
 
@@ -288,6 +291,7 @@ class DispatchContinuationTests(unittest.TestCase):
         for status in ("WAITING_FOR_IDENTITY_VERIFICATION", "BLOCKED", "NO_ELIGIBLE_ENGINEER"):
             class BusinessSystem:
                 settings = AppSettings(nac_mode="fixture")
+                client = FixtureNokiaClient(settings)
                 dispatch_authorization_url = None
                 current_dispatch_status = {
                     "incident_id": "incident-safe", "decision": "BLOCK", "status": status,
@@ -315,6 +319,7 @@ class DispatchContinuationTests(unittest.TestCase):
     def test_field_intervention_route_replays_completed_idempotency_key(self):
         class BackendSystem:
             settings = AppSettings(nac_mode="fixture")
+            client = FixtureNokiaClient(settings)
             dispatch_authorization_url = None
             current_dispatch_status = {
                 "incident_id": "incident-idempotent", "decision": "BLOCK",
@@ -371,7 +376,9 @@ class DispatchContinuationTests(unittest.TestCase):
         self.assertEqual(cycle["execution_context"], "ISOLATED_FIXTURE_DEMO")
         self.assertFalse(cycle["durable_history_write"])
         self.assertEqual(memory.count(), 0)
-        verification_start.assert_awaited_once()
+        verification_start.assert_not_awaited()
+        self.assertFalse(cycle["trusted_dispatch"]["provider_authorization_executed"])
+        self.assertEqual(cycle["trusted_dispatch"]["provenance"], "SIMULATED")
 
     def test_backend_authoritative_standard_run_uses_shared_system_and_sanitizes_cycle(self):
         class BackendSystem:

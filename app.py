@@ -750,6 +750,14 @@ class BackendSafeDiagnosticError(RuntimeError):
         self.stage = stage
 
 
+class BackendOperationalError(RuntimeError):
+    """Sanitized transport/status category for judge-facing controls."""
+
+    def __init__(self, category: str):
+        super().__init__(category)
+        self.category = category
+
+
 def run_async(coro):
     """Run an async HARIS operation from Streamlit's synchronous UI."""
     try:
@@ -786,7 +794,12 @@ async def backend_request(
         if key.lower() != "authorization"
     })
     async with httpx.AsyncClient(timeout=10.0) as http:
-        response = await http.request(method, f"{base}{path}", json=payload, headers=headers)
+        try:
+            response = await http.request(method, f"{base}{path}", json=payload, headers=headers)
+        except httpx.TimeoutException as exc:
+            raise BackendOperationalError("BACKEND_TIMEOUT") from exc
+        except httpx.RequestError as exc:
+            raise BackendOperationalError("BACKEND_UNAVAILABLE") from exc
         if response.status_code == 500 and path == "/api/nac/autonomous/field-intervention-demo":
             try:
                 diagnostic = response.json()
@@ -802,8 +815,21 @@ async def backend_request(
                 and diagnostic.get("stage") in allowed_stages
             ):
                 raise BackendSafeDiagnosticError(diagnostic["stage"])
-        response.raise_for_status()
-        return response.json()
+        if response.status_code >= 400:
+            category = {
+                401: "AUTHENTICATION_REQUIRED", 403: "ACCESS_DENIED",
+                409: "REQUEST_IN_PROGRESS", 422: "REQUEST_INVALID",
+                429: "RATE_LIMITED", 500: "BACKEND_INTERNAL_ERROR",
+                502: "BACKEND_DEPENDENCY_UNAVAILABLE", 503: "BACKEND_NOT_READY",
+            }.get(response.status_code, "BACKEND_REQUEST_FAILED")
+            raise BackendOperationalError(category)
+        try:
+            result = response.json()
+        except Exception as exc:
+            raise BackendOperationalError("BACKEND_RESPONSE_INVALID") from exc
+        if not isinstance(result, dict):
+            raise BackendOperationalError("BACKEND_RESPONSE_INVALID")
+        return result
 
 
 def unavailable_backend_status(cached: Optional[Dict[str, Any]], reason: str) -> Dict[str, Any]:
@@ -1172,7 +1198,8 @@ def render_prediction(result: Optional[Dict[str, Any]]) -> None:
 def current_network_level(entity: Dict[str, Any]) -> Optional[str]:
     """Return categorical congestion only when authoritative evidence is current."""
     freshness = safe_upper(entity.get("freshness"), "")
-    if freshness in {"STALE", "UNAVAILABLE"}:
+    source = safe_upper(entity.get("source") or entity.get("source_provenance"), "")
+    if freshness in {"STALE", "UNAVAILABLE"} or source == "UNAVAILABLE":
         return None
     level = entity.get("nokia_congestion") or entity.get("congestion_level")
     return level if level in {"None", "Low", "Medium", "High"} else None
@@ -1439,11 +1466,28 @@ def authoritative_network_entities(result: Optional[Dict[str, Any]]) -> Dict[str
     source = "FIXTURE_SIMULATED" if settings.nac_mode == "fixture" else "UNAVAILABLE"
     return {cell: {"entity_id": cell, "nokia_congestion": values.get("congestion_level"), "haris_state": "INCIDENT_OPEN" if values.get("congestion_level") == "High" else "WATCHING" if values.get("congestion_level") == "Medium" else "STABLE", "source": source, "source_type": "HARIS_CONFIGURED_LOGICAL_CELL"} for cell, values in rows.items()}
 
-@st.fragment(run_every=3)
+def network_presentation_fingerprint(data: Dict[str, Dict[str, Any]]) -> str:
+    """Canonical fingerprint containing only topology/alert presentation truth."""
+    rows = []
+    for cell_id, raw in sorted(data.items()):
+        item = safe_mapping(raw)
+        rows.append({
+            "cell_id": str(cell_id),
+            "level": current_network_level(item),
+            "haris_state": safe_upper(item.get("haris_state"), ""),
+            "freshness": safe_upper(item.get("freshness"), ""),
+            "availability": safe_upper(item.get("availability"), ""),
+            "source": safe_upper(item.get("source"), ""),
+            "source_type": safe_upper(item.get("source_type"), ""),
+        })
+    return json.dumps(rows, sort_keys=True, separators=(",", ":"))
+
+
 def render_network_section(
     result: Optional[Dict[str, Any]],
+    data: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> None:
-    data = authoritative_network_entities(result)
+    data = authoritative_network_entities(result) if data is None else data
 
     left, right = st.columns([.82, 2.18])
 
@@ -2041,12 +2085,12 @@ def render_controls() -> None:
                             "POST", "/api/nac/autonomous/field-intervention-demo",
                             extra_headers={"Idempotency-Key": request_key},
                         ))
-                        if not payload:
-                            raise RuntimeError("Authoritative HARIS backend did not return a demo status.")
-                        st.session_state.last_result = payload.get("cycle", {})
+                        if not payload or not isinstance(payload.get("cycle"), dict):
+                            raise BackendOperationalError("BACKEND_RESPONSE_INVALID")
+                        st.session_state.field_demo_cycle = payload.get("cycle", {})
                         st.session_state.backend_consent_action_token = payload.get("consent_action_token")
                         st.session_state.backend_workflow_session_token = payload.get("workflow_session_token")
-                        dispatch = st.session_state.last_result.get("trusted_dispatch", {})
+                        dispatch = st.session_state.field_demo_cycle.get("trusted_dispatch", {})
                         st.session_state.backend_consent_action_pending_id = dispatch.get("pending_id")
                         st.session_state.backend_consent_action_engineer_id = dispatch.get("engineer_id")
                         st.session_state.pop("backend_authorization_url", None)
@@ -2054,7 +2098,7 @@ def render_controls() -> None:
                         # Local standalone fixture fallback only. A deployed
                         # console must configure HARIS_BACKEND_URL so Render
                         # owns pending dispatch/OAuth state.
-                        st.session_state.last_result = run_async(
+                        st.session_state.field_demo_cycle = run_async(
                             get_system().run_field_intervention_demo(isolated_fixture_demo=True)
                         )
                     st.session_state.field_demo_completed = True
@@ -2066,6 +2110,22 @@ def render_controls() -> None:
                     logger.warning("HARIS field intervention demo failed at safe stage=%s", exc.stage)
                     st.error("Field intervention could not complete.")
                     st.caption(f"Diagnostic stage: {exc.stage}")
+                except BackendOperationalError as exc:
+                    st.session_state.field_demo_in_progress = False
+                    logger.warning("HARIS field intervention request failed category=%s", exc.category)
+                    messages = {
+                        "AUTHENTICATION_REQUIRED": "Field intervention requires backend authentication.",
+                        "ACCESS_DENIED": "Field intervention is not permitted in the current operating mode.",
+                        "REQUEST_IN_PROGRESS": "Field intervention demonstration is already in progress.",
+                        "REQUEST_INVALID": "Field intervention request was rejected safely.",
+                        "RATE_LIMITED": "Field intervention is temporarily rate limited. Try again later.",
+                        "BACKEND_NOT_READY": "Field intervention is unavailable while the backend is not ready.",
+                        "BACKEND_DEPENDENCY_UNAVAILABLE": "Field intervention identity authorization is unavailable; dispatch remains blocked.",
+                        "BACKEND_RESPONSE_INVALID": "Field intervention received an invalid backend response.",
+                        "BACKEND_TIMEOUT": "Field intervention timed out while waiting for the backend.",
+                        "BACKEND_UNAVAILABLE": "Field intervention is unavailable because the backend cannot be reached.",
+                    }
+                    st.error(messages.get(exc.category, "Field intervention could not complete."))
                 except Exception:
                     st.session_state.field_demo_in_progress = False
                     logger.warning("HARIS field intervention demo failed; details suppressed")
@@ -2308,7 +2368,8 @@ def render_network_intelligence(result: Optional[Dict[str, Any]]) -> None:
     st.caption("HARIS creates and cleans up geofence subscriptions only when policy and a playbook require it.")
     render_environment(result)
     render_prediction(result)
-    render_network_section(result)
+    cached_network = st.session_state.get("network_intelligence_entities")
+    render_network_section(result, cached_network if isinstance(cached_network, dict) else None)
     geofence_events = [event for event in (safe_mapping(result).get("events") or []) if "GEOFENCE" in safe_upper(safe_mapping(event).get("message"), "")]
     st.markdown('### GEOFENCE EVENTS')
     if geofence_events: st.dataframe(geofence_events, width="stretch", hide_index=True)
@@ -2317,8 +2378,16 @@ def render_network_intelligence(result: Optional[Dict[str, Any]]) -> None:
 
 @st.fragment(run_every=3)
 def render_observation_monitor() -> None:
-    """Refresh only backend-owned, read-only Nokia evidence for this section."""
+    """Poll lightweight authority; remount the heavy topology only on change."""
     try:
+        network_payload = run_async(backend_request("GET", "/api/nac/network-state")) or {}
+        entities = safe_mapping(network_payload).get("entities")
+        if not isinstance(entities, dict):
+            entities = {}
+        fingerprint = network_presentation_fingerprint(entities)
+        previous = st.session_state.get("network_intelligence_fingerprint")
+        st.session_state.network_intelligence_entities = entities
+        st.session_state.network_intelligence_fingerprint = fingerprint
         payload = run_async(backend_request("GET", "/api/nac/observations/latest")) or {}
         status = safe_mapping(payload.get("status"))
         observation = safe_mapping(payload.get("observation"))
@@ -2341,6 +2410,8 @@ def render_observation_monitor() -> None:
             f'{safe_text(status.get("interval_seconds"))}s · Last successful read: {safe_text(last_text)} · '
             f'Next scheduled read: {safe_text(next_text)}<br>{safe_text(capability_text)}<br>Source: {safe_text(observation.get("source") or status.get("source"), "N/A")}</div></div></div>'
         )
+        if previous is not None and previous != fingerprint:
+            st.rerun(scope="app")
     except Exception:
         st.caption("Nokia live monitoring: DISCONNECTED — supervisory read unavailable.")
 
@@ -2485,6 +2556,19 @@ def render_console() -> None:
                   Durable history write: DISABLED
                 </div>
                 """
+            )
+        field_demo = st.session_state.get("field_demo_cycle")
+        if field_demo:
+            dispatch = safe_mapping(safe_mapping(field_demo).get("trusted_dispatch"))
+            render_html(
+                '<div class="notification-panel">'
+                '<b>SIMULATED / FIXTURE FIELD INTERVENTION DEMONSTRATION</b><br>'
+                'Authority: PROCESS-LOCAL FIXTURE DEMO<br>'
+                'Identity verification: REQUIRED<br>'
+                'Real provider authorization: NOT EXECUTED IN FIXTURE DEMO<br>'
+                f'Demo state: {safe_text(dispatch.get("status"), "WAITING_FOR_IDENTITY_VERIFICATION")}<br>'
+                'Durable operational incident/history: NOT CREATED'
+                '</div>'
             )
         autonomous_result = fixture_demo_presentation_cycle(fixture_demo) if fixture_demo else result
         render_decision_engine(autonomous_result)

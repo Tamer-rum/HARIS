@@ -143,6 +143,8 @@ class FinalFrontendPolishTests(unittest.TestCase):
         self.assertIn('Field intervention could not complete.', controls)
         self.assertIn('Diagnostic stage: {exc.stage}', controls)
         self.assertNotIn('Field intervention demo failed. Review the authenticated backend status.', controls)
+        self.assertIn('st.session_state.field_demo_cycle', controls)
+        self.assertNotIn('st.session_state.last_result = payload.get("cycle"', controls)
 
     def test_fixture_demo_trace_is_explicitly_simulated_and_process_local(self):
         presented = app.fixture_demo_presentation_cycle({
@@ -267,18 +269,45 @@ class FinalFrontendPolishTests(unittest.TestCase):
             svg = app.topology_svg({"T03": entity}, False)
             self.assertIn(f"NOKIA: UNAVAILABLE / HARIS: STALE / NOKIA LIVE", svg)
             self.assertNotIn("NOKIA: HIGH / HARIS: INCIDENT_OPEN", svg)
+        unavailable_source = {"nokia_congestion": "High", "freshness": "FRESH", "source": "UNAVAILABLE"}
+        self.assertIsNone(app.current_network_level(unavailable_source))
 
     def test_topology_auto_refresh_is_bounded_and_does_not_trigger_execution(self):
-        section_start = self.source.index("@st.fragment(run_every=3)\ndef render_network_section")
+        section_start = self.source.index("def network_presentation_fingerprint")
         section = self.source[section_start:self.source.index("# KPI impact", section_start)]
-        self.assertIn("authoritative_network_entities(result)", section)
         self.assertIn("topology_svg(data=data, active=False)", section)
+        monitor_start = self.source.index("@st.fragment(run_every=3)\ndef render_observation_monitor")
+        monitor = self.source[monitor_start:self.source.index("def render_trusted_dispatch", monitor_start)]
+        self.assertIn('"GET", "/api/nac/network-state"', monitor)
+        self.assertIn('"GET", "/api/nac/observations/latest"', monitor)
+        self.assertIn('st.rerun(scope="app")', monitor)
+        self.assertNotIn("topology_svg(", monitor)
         for forbidden in (
             "/api/nac/autonomous/run", "run_cycle(", "run_field_intervention_demo(",
             "request_qos(", "attach_slice(", "create_geofence(", "public_dust_feed_url",
             "gemini", "groq", "crewai",
         ):
             self.assertNotIn(forbidden, section.lower())
+
+    def test_network_presentation_fingerprint_ignores_order_and_timestamps(self):
+        first = {
+            "T05": {"nokia_congestion": "Low", "freshness": "FRESH", "source": "NOKIA_LIVE", "observed_at": 1},
+            "T03": {"nokia_congestion": "High", "freshness": "FRESH", "source": "NOKIA_LIVE", "next_poll_at": 2},
+        }
+        repeated = {
+            "T03": {"nokia_congestion": "High", "freshness": "FRESH", "source": "NOKIA_LIVE", "next_poll_at": 999},
+            "T05": {"nokia_congestion": "Low", "freshness": "FRESH", "source": "NOKIA_LIVE", "observed_at": 999},
+        }
+        self.assertEqual(app.network_presentation_fingerprint(first), app.network_presentation_fingerprint(repeated))
+
+    def test_network_presentation_fingerprint_tracks_semantic_changes(self):
+        base = {"T03": {"nokia_congestion": "High", "freshness": "FRESH", "source": "NOKIA_LIVE"}}
+        for changed in (
+            {"T03": {"nokia_congestion": "Low", "freshness": "FRESH", "source": "NOKIA_LIVE"}},
+            {"T03": {"nokia_congestion": "High", "freshness": "STALE", "source": "NOKIA_LIVE"}},
+            {"T03": {"nokia_congestion": "High", "freshness": "FRESH", "source": "UNAVAILABLE"}},
+        ):
+            self.assertNotEqual(app.network_presentation_fingerprint(base), app.network_presentation_fingerprint(changed))
 
 
 if __name__ == "__main__":

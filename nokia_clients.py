@@ -200,10 +200,6 @@ class FixtureNokiaClient(BaseNokiaClient):
 
     def __init__(self, settings: AppSettings):
         super().__init__(settings)
-        logger.warning(
-            "DEBUG: rollback_test_mode=%r",
-            self.settings.rollback_test_mode,
-        )
         self.root = Path(settings.fixture_dir)
         if not self.root.is_absolute():
             self.root = Path(__file__).resolve().parent / self.root
@@ -1394,6 +1390,8 @@ async def authoritative_field_intervention_demo(request: Request) -> Any:
         return _field_intervention_failure("FIELD_SYSTEM_CONSTRUCTION")
     if system.settings.nac_mode != "fixture":
         raise HTTPException(status_code=403, detail="Field Intervention Demo is available only in FIXTURE mode.")
+    if not isinstance(system.client, FixtureNokiaClient):
+        raise HTTPException(status_code=503, detail="Isolated fixture demonstration adapter is unavailable.")
     idempotency_key = request.headers.get("idempotency-key", "")
     cached = await field_intervention_demo_idempotency.begin(idempotency_key)
     if cached is not None:
@@ -1415,6 +1413,12 @@ async def authoritative_field_intervention_demo(request: Request) -> Any:
             "cycle": system.current_cycle_status,
             "consent_action_token": action_token,
             "workflow_session_token": workflow_token,
+            "execution_context": "ISOLATED_FIXTURE_DEMO",
+            "provenance": "SIMULATED",
+            "authority": "PROCESS_LOCAL_FIXTURE_DEMO",
+            "provider_authorization_executed": False,
+            "durable_domain_write": False,
+            "durable_history_write": False,
         }
         await field_intervention_demo_idempotency.complete(idempotency_key, response)
         return response

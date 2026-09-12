@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
+import httpx
 
 import app as streamlit_app
 import nokia_clients
@@ -215,7 +216,7 @@ class ApiSecurityTests(unittest.TestCase):
         http.assert_not_called()
 
         configured = self.settings.model_copy(update={"haris_backend_url": "https://backend.invalid"})
-        response = MagicMock()
+        response = MagicMock(status_code=200)
         response.json.return_value = {"mode": "fixture"}
         response.raise_for_status.return_value = None
         async_client = AsyncMock()
@@ -229,7 +230,7 @@ class ApiSecurityTests(unittest.TestCase):
 
     def test_streamlit_backend_request_cannot_override_authorization(self):
         configured = self.settings.model_copy(update={"haris_backend_url": "https://backend.invalid"})
-        response = MagicMock()
+        response = MagicMock(status_code=200)
         response.json.return_value = {"ok": True}
         response.raise_for_status.return_value = None
         async_client = AsyncMock()
@@ -262,6 +263,62 @@ class ApiSecurityTests(unittest.TestCase):
             ))
         self.assertEqual(raised.exception.stage, "FIELD_CYCLE_EXECUTION")
         self.assertNotIn("must-not-be-rendered", str(raised.exception))
+
+    def test_streamlit_field_transport_failures_are_safely_classified(self):
+        configured = self.settings.model_copy(update={"haris_backend_url": "https://backend.invalid"})
+        expected = {
+            401: "AUTHENTICATION_REQUIRED", 403: "ACCESS_DENIED",
+            409: "REQUEST_IN_PROGRESS", 422: "REQUEST_INVALID",
+            429: "RATE_LIMITED", 500: "BACKEND_INTERNAL_ERROR",
+            502: "BACKEND_DEPENDENCY_UNAVAILABLE", 503: "BACKEND_NOT_READY",
+        }
+        for status, category in expected.items():
+            response = MagicMock(status_code=status)
+            response.json.return_value = {}
+            async_client = AsyncMock()
+            async_client.__aenter__.return_value.request.return_value = response
+            async_client.__aexit__.return_value = None
+            with self.subTest(status=status), patch.object(streamlit_app, "settings", configured), \
+                    patch("httpx.AsyncClient", return_value=async_client), \
+                    self.assertRaises(streamlit_app.BackendOperationalError) as raised:
+                asyncio.run(streamlit_app.backend_request(
+                    "POST", "/api/nac/autonomous/field-intervention-demo"
+                ))
+            self.assertEqual(raised.exception.category, category)
+
+        for error, category in (
+            (httpx.ReadTimeout("timed out"), "BACKEND_TIMEOUT"),
+            (httpx.ConnectError("unreachable"), "BACKEND_UNAVAILABLE"),
+        ):
+            async_client = AsyncMock()
+            async_client.__aenter__.return_value.request.side_effect = error
+            async_client.__aexit__.return_value = None
+            with self.subTest(category=category), patch.object(streamlit_app, "settings", configured), \
+                    patch("httpx.AsyncClient", return_value=async_client), \
+                    self.assertRaises(streamlit_app.BackendOperationalError) as raised:
+                asyncio.run(streamlit_app.backend_request(
+                    "POST", "/api/nac/autonomous/field-intervention-demo"
+                ))
+            self.assertEqual(raised.exception.category, category)
+            self.assertNotIn(str(error), str(raised.exception))
+
+    def test_streamlit_rejects_empty_or_malformed_success_response(self):
+        configured = self.settings.model_copy(update={"haris_backend_url": "https://backend.invalid"})
+        for returned in (ValueError("not json"), ["not", "an", "object"]):
+            response = MagicMock(status_code=200)
+            response.json.side_effect = returned if isinstance(returned, Exception) else None
+            if not isinstance(returned, Exception):
+                response.json.return_value = returned
+            async_client = AsyncMock()
+            async_client.__aenter__.return_value.request.return_value = response
+            async_client.__aexit__.return_value = None
+            with patch.object(streamlit_app, "settings", configured), \
+                    patch("httpx.AsyncClient", return_value=async_client), \
+                    self.assertRaises(streamlit_app.BackendOperationalError) as raised:
+                asyncio.run(streamlit_app.backend_request(
+                    "POST", "/api/nac/autonomous/field-intervention-demo"
+                ))
+            self.assertEqual(raised.exception.category, "BACKEND_RESPONSE_INVALID")
 
     def test_isolated_autonomous_endpoint_is_idempotent_and_fixture_only(self):
         system = MagicMock()
