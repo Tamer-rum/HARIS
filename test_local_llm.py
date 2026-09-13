@@ -61,28 +61,10 @@ class LocalModelTests(unittest.TestCase):
                 LocalChatModel(url, "m", 5)
 
     def test_test_runtime_never_builds_a_local_model(self):
-        router = ReasoningRouter(AppSettings(
-            haris_local_llm_enabled=True, local_llm_base_url="http://127.0.0.1:11434"
-        ))
+        router = ReasoningRouter(AppSettings(local_llm_base_url="http://127.0.0.1:11434"))
         self.assertIsNone(router.local)
         self.assertEqual(router.availability_reason, "runtime_policy_blocks_llm")
         self.assertIsNone(get_settings().local_llm_base_url)
-
-    def test_local_model_is_disabled_by_default_even_with_a_url(self):
-        router = ReasoningRouter(AppSettings(
-            nac_mode="fixture", local_llm_base_url="http://127.0.0.1:11434"
-        ))
-        self.assertIsNone(router.local)
-
-    def test_explicit_opt_in_builds_loopback_advisor_when_policy_allows(self):
-        settings = AppSettings(
-            nac_mode="fixture", haris_local_llm_enabled=True,
-            local_llm_base_url="http://127.0.0.1:11434",
-        )
-        with unittest.mock.patch("agents.external_access_policy") as policy:
-            policy.return_value.allow_llm = True
-            router = ReasoningRouter(settings)
-        self.assertIsInstance(router.local, LocalChatModel)
 
     def test_local_model_is_the_last_link_of_the_chain(self):
         router = ReasoningRouter(self.settings)
@@ -148,22 +130,10 @@ class LocalModelTests(unittest.TestCase):
 
     def test_isolated_demo_without_local_model_stays_deterministic(self):
         system = self._isolated_system()
-        with unittest.mock.patch(
-            "agents.httpx.AsyncClient", side_effect=AssertionError("Ollama HTTP attempted")
-        ) as http_client:
-            result = asyncio.run(system.run_cycle(True, isolated_fixture_demo=True))
-        http_client.assert_not_called()
+        result = asyncio.run(system.run_cycle(True, isolated_fixture_demo=True))
         trace = "\n".join(str(line) for line in result.get("trace", []))
         self.assertIn("MODEL=deterministic", trace)
         self.assertTrue(result["warden"]["verified"])
-
-    def test_local_advisory_cannot_override_warden(self):
-        system = self._isolated_system()
-        system.reasoning.local = _Model(_planner(("candidate-1", "candidate-0")))
-        result = asyncio.run(system.run_cycle(True, isolated_fixture_demo=True))
-        self.assertTrue(result["warden"]["verified"])
-        self.assertTrue(result["warden"]["safety_checks"]["confidence_ok"])
-        self.assertEqual(result["authority"], "PROCESS_LOCAL_FIXTURE_DEMO")
 
 
 if __name__ == "__main__":

@@ -1,6 +1,4 @@
 import asyncio
-import contextlib
-import io
 import math
 import tomllib
 import unittest
@@ -19,50 +17,6 @@ class FinalFrontendPolishTests(unittest.TestCase):
     def test_streamlit_same_origin_cors_protection_is_enabled(self):
         config = tomllib.loads(Path(".streamlit/config.toml").read_text(encoding="utf-8"))
         self.assertIs(config["server"]["enableCORS"], True)
-
-    def test_streamlit_backend_secrets_are_narrowly_bootstrapped(self):
-        environment = {}
-        secret_value = "fixture-secret-value"
-        app.bootstrap_streamlit_backend_settings({
-            "HARIS_BACKEND_URL": "https://backend.example",
-            "HARIS_BACKEND_API_TOKEN": secret_value,
-            "SUPABASE_KEY": "must-not-cross-boundary",
-            "NAC_API_TOKEN": "must-not-cross-boundary",
-            "HARIS_OPERATIONAL_API_TOKEN": "must-not-cross-boundary",
-        }, environment)
-        configured = AppSettings(**{
-            key.lower(): value for key, value in environment.items()
-        })
-        self.assertEqual(configured.haris_backend_url, "https://backend.example")
-        self.assertIsNotNone(configured.haris_backend_api_token)
-        self.assertEqual(set(environment), {
-            "HARIS_BACKEND_URL", "HARIS_BACKEND_API_TOKEN"
-        })
-        output = io.StringIO()
-        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
-            print(configured)
-        self.assertNotIn(secret_value, output.getvalue())
-
-    def test_existing_environment_wins_over_streamlit_secrets(self):
-        environment = {
-            "HARIS_BACKEND_URL": "https://environment.example",
-            "HARIS_BACKEND_API_TOKEN": "environment-test-token",
-        }
-        app.bootstrap_streamlit_backend_settings({
-            "HARIS_BACKEND_URL": "https://secret.example",
-            "HARIS_BACKEND_API_TOKEN": "streamlit-test-token",
-        }, environment)
-        self.assertEqual(environment["HARIS_BACKEND_URL"], "https://environment.example")
-        self.assertEqual(environment["HARIS_BACKEND_API_TOKEN"], "environment-test-token")
-
-    def test_missing_streamlit_secrets_preserves_local_fixture_defaults(self):
-        environment = {}
-        app.bootstrap_streamlit_backend_settings({}, environment)
-        configured = AppSettings()
-        self.assertEqual(environment, {})
-        self.assertEqual(configured.nac_mode, "fixture")
-        self.assertIsNone(configured.haris_backend_url)
-        self.assertIsNone(configured.haris_backend_api_token)
 
     def test_01_operational_cards_use_shared_content_structure(self):
         markup = app.operational_card("Backend Health", "HEALTHY", "All services operational", icon="server")

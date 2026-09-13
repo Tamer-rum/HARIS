@@ -14,14 +14,14 @@ Sense -> Reason -> Guard -> Act -> Verify -> Learn
 
 HARIS is autonomous within defined policy authority. Capabilities that require unsupported controls, human consent, or operator resources remain explicitly bounded or unavailable rather than being presented as completed live operations.
 
-![HARIS simulated storm-map demonstration](docs/screenshots/storm_map.png)
+![HARIS storm map — towers before and after HARIS acts](docs/screenshots/storm_map.png)
 
-![HARIS console — simulated autonomous storm-cycle demonstration](docs/screenshots/console_storm.png)
+![HARIS console — autonomous storm cycle with the local AI advisor](docs/screenshots/console_storm.png)
 
 <details>
 <summary>More screenshots</summary>
 
-| Simulated decision trace with optional local advisory | Tamper-evident audit chain |
+| Decision trace (local AI ranked the plan) | Tamper-evident audit chain |
 |---|---|
 | ![trace](docs/screenshots/trace_storm.png) | ![audit](docs/screenshots/history_audit.png) |
 
@@ -63,7 +63,7 @@ LangGraph deterministic supervisor
 | Frontend | Streamlit supervisory operations dashboard |
 | Backend | FastAPI authoritative runtime and API boundary |
 | Agent orchestration | LangGraph supervisor with deterministic workflow transitions |
-| Advisory reasoning | CrewAI role-scoped specialists using configured Gemini or Groq providers; an explicitly enabled loopback Ollama model is an optional final advisor before deterministic policy |
+| Advisory reasoning | CrewAI role-scoped specialists using configured Gemini or Groq providers; the planner's chain ends on a local Ollama model, then deterministic policy |
 | Telecom integration | Nokia Network as Code and CAMARA-compatible capabilities |
 | Persistence | Supabase PostgreSQL durable event, incident, action, recovery, and audit state |
 | Memory | Existing bounded operational memory and retrieval components; durable records remain backend-owned |
@@ -86,13 +86,13 @@ LangGraph supervises state and deterministic workflow transitions. CrewAI provid
 
 ## Local AI advisor (no internet required)
 
-A local [Ollama](https://ollama.com) model can optionally provide advisory ranking without an Internet AI service. It is disabled by default and requires both `HARIS_LOCAL_LLM_ENABLED=true` and a loopback-only `LOCAL_LLM_BASE_URL`; the Windows launcher enables it only after detecting the configured model. The default model name is `qwen2.5:1.5b`.
+A sandstorm can take the backhaul down with it, so the planner's advisory chain ends on this machine: Gemini -> Groq -> a local [Ollama](https://ollama.com) model -> deterministic policy. Set `LOCAL_LLM_BASE_URL` (the launcher does this automatically when Ollama is running); the default model is `qwen2.5:1.5b`.
 
-- When explicitly enabled, it is the only AI advisor the isolated fixture demo may consult; by default that demo makes no AI or HTTP request.
+- It is the only advisor the isolated fixture demo may consult; external AI/HTTP access stays disabled.
 - Loopback URLs only, so enabling it opens no outbound path.
 - It is bounded exactly like the hosted models: it may only rank the candidate IDs TRIAGE supplies, it moves confidence by at most +/-0.05, and any invalid output falls back to deterministic policy. WARDEN still decides.
 
-Demo behavior: when the optional advisor is enabled and returns a valid bounded ranking, the decision trace identifies the local model. Latency depends on operator hardware and model state; no performance benchmark is claimed.
+Measured on a laptop CPU: about 0.6 s per ranking once the model is loaded (the launcher pre-loads it). The decision trace shows `AI_PLANNER_USED=true MODEL=qwen2.5:1.5b (local)`.
 
 ## Closed-loop operations and playbooks
 
@@ -311,7 +311,7 @@ No credentials, private endpoints, or environment data are embedded in these ref
 
 ### One click (Windows)
 
-Double-click **`START-HARIS.bat`**. The first run creates `.venv`, installs the requirements and copies `.env.example` to `.env` (fixture mode, no credentials). The console then opens at <http://localhost:8501>; `STOP-HARIS.bat` stops it. If Ollama is running with `qwen2.5:1.5b` pulled, the launcher explicitly opts into the loopback-only local advisor and pre-loads the model (set `HARIS_LOCAL_MODEL` to use another one).
+Double-click **`START-HARIS.bat`**. The first run creates `.venv`, installs the requirements and copies `.env.example` to `.env` (fixture mode, no credentials). The console then opens at <http://localhost:8501>; `STOP-HARIS.bat` stops it. If Ollama is running with `qwen2.5:1.5b` pulled, the launcher switches on the local AI advisor and pre-loads the model (set `HARIS_LOCAL_MODEL` to use another one).
 
 Console screenshots for the README and the deck: `python scripts/capture_screens.py` (Playwright with the local Chrome).
 

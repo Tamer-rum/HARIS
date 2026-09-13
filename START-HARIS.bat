@@ -30,7 +30,6 @@ if errorlevel 1 (
   echo Local AI: Ollama or model %HARIS_LOCAL_MODEL% not found - deterministic policy only.
 ) else (
   echo Local AI: %HARIS_LOCAL_MODEL% on this machine.
-  set "HARIS_LOCAL_LLM_ENABLED=true"
   set "LOCAL_LLM_BASE_URL=http://127.0.0.1:11434"
   set "LOCAL_LLM_MODEL=%HARIS_LOCAL_MODEL%"
   rem Load the model into memory now so the first cycle is fast.

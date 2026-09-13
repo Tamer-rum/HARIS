@@ -284,7 +284,6 @@ class AppSettings(BaseSettings):
     # Optional model served on this machine (Ollama). It is the last advisory
     # provider and the only one that keeps working when a storm takes the
     # backhaul down. Loopback hosts only; unset means disabled.
-    haris_local_llm_enabled: bool = False
     local_llm_base_url: Optional[str] = None
     local_llm_model: str = "qwen2.5:1.5b"
     # Generous because the first call also loads the model into memory.
@@ -349,7 +348,7 @@ class AppSettings(BaseSettings):
 
     @property
     def has_local_llm(self) -> bool:
-        return self.haris_local_llm_enabled and bool(self.local_llm_base_url)
+        return bool(self.local_llm_base_url)
 
     @property
     def has_supabase(self) -> bool:
@@ -374,8 +373,7 @@ def get_settings() -> AppSettings:
             nac_mode="fixture", nokia_observation_enabled=False,
             enable_continuous_loop=False, enable_live_write_loop=False,
             nac_api_token=None, gemini_api_key=None, groq_api_key=None,
-            haris_local_llm_enabled=False, local_llm_base_url=None,
-            supabase_url=None, supabase_key=None, mem0_api_key=None,
+            local_llm_base_url=None, supabase_url=None, supabase_key=None, mem0_api_key=None,
             haris_history_persistence_enabled=False, public_dust_feed_url=None,
             haris_backend_url=None, haris_operational_api_token=None,
             haris_backend_api_token=None, nokia_event_webhook_secret=None,

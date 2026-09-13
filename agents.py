@@ -204,7 +204,7 @@ class ReasoningRouter:
         if not external_access_policy().allow_llm:
             self.availability_reason = "runtime_policy_blocks_llm"
             return
-        if settings.has_local_llm:
+        if settings.local_llm_base_url:
             try:
                 self.local = LocalChatModel(
                     settings.local_llm_base_url, settings.local_llm_model,

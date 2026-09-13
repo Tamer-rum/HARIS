@@ -5,11 +5,9 @@ import html
 import json
 import logging
 import math
-import os
 import secrets
 import time
 import textwrap
-from collections.abc import Mapping, MutableMapping
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import re
@@ -33,42 +31,6 @@ from nokia_clients import build_nokia_client
 # No backend logic is reimplemented here.
 # ============================================================================
 
-
-_STREAMLIT_BACKEND_SETTING_NAMES = (
-    "HARIS_BACKEND_URL",
-    "HARIS_BACKEND_API_TOKEN",
-)
-
-
-def bootstrap_streamlit_backend_settings(
-    secret_source: Optional[Mapping[str, Any]] = None,
-    environ: Optional[MutableMapping[str, str]] = None,
-) -> None:
-    """Expose only Streamlit's backend client settings before AppSettings caches.
-
-    Existing non-empty process settings win. Missing Streamlit secrets are normal
-    for local fixture runs, and no secret value is logged or returned.
-    """
-    target = os.environ if environ is None else environ
-    if secret_source is None:
-        if get_script_run_ctx(suppress_warning=True) is None:
-            return
-        try:
-            secret_source = st.secrets
-        except Exception:
-            return
-    for name in _STREAMLIT_BACKEND_SETTING_NAMES:
-        if str(target.get(name) or "").strip():
-            continue
-        try:
-            value = secret_source.get(name)
-        except Exception:
-            continue
-        if isinstance(value, str) and value.strip():
-            target[name] = value.strip()
-
-
-bootstrap_streamlit_backend_settings()
 settings = get_settings()
 
 logging.basicConfig(
@@ -2840,9 +2802,9 @@ def render_console() -> None:
         render_controls()
         fixture_demo = st.session_state.get("fixture_demo_cycle")
         if fixture_demo:
-            local_ai_state = (
-                f"ENABLED ({html.escape(settings.local_llm_model)}, loopback only)"
-                if settings.has_local_llm else "DISABLED"
+            local_ai = (
+                f"Local AI advisory: {html.escape(settings.local_llm_model)} on this machine (no internet)<br>"
+                if settings.local_llm_base_url else ""
             )
             render_html(
                 f"""
@@ -2850,9 +2812,8 @@ def render_console() -> None:
                   <b>SIMULATED / FIXTURE HARIS DEMONSTRATION</b><br>
                   Authority: PROCESS-LOCAL FIXTURE DEMO<br>
                   Provider access: DISABLED<br>
-                  External provider / Internet AI access: DISABLED<br>
-                  Local Ollama advisory: {local_ai_state}<br>
-                  Authority: ADVISORY ONLY<br>
+                  External AI/HTTP access: DISABLED<br>
+                  {local_ai}
                   Durable operational incident: NOT CREATED<br>
                   Durable history write: DISABLED
                 </div>
