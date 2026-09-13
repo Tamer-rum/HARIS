@@ -14,6 +14,19 @@ Sense -> Reason -> Guard -> Act -> Verify -> Learn
 
 HARIS is autonomous within defined policy authority. Capabilities that require unsupported controls, human consent, or operator resources remain explicitly bounded or unavailable rather than being presented as completed live operations.
 
+![HARIS simulated storm-map demonstration](docs/screenshots/storm_map.png)
+
+![HARIS console — simulated autonomous storm-cycle demonstration](docs/screenshots/console_storm.png)
+
+<details>
+<summary>More screenshots</summary>
+
+| Simulated decision trace with optional local advisory | Tamper-evident audit chain |
+|---|---|
+| ![trace](docs/screenshots/trace_storm.png) | ![audit](docs/screenshots/history_audit.png) |
+
+</details>
+
 ## Evidence classification
 
 All implementation and demonstration claims use the following labels:
@@ -50,7 +63,7 @@ LangGraph deterministic supervisor
 | Frontend | Streamlit supervisory operations dashboard |
 | Backend | FastAPI authoritative runtime and API boundary |
 | Agent orchestration | LangGraph supervisor with deterministic workflow transitions |
-| Advisory reasoning | CrewAI role-scoped specialists using configured Gemini or Groq providers |
+| Advisory reasoning | CrewAI role-scoped specialists using configured Gemini or Groq providers; an explicitly enabled loopback Ollama model is an optional final advisor before deterministic policy |
 | Telecom integration | Nokia Network as Code and CAMARA-compatible capabilities |
 | Persistence | Supabase PostgreSQL durable event, incident, action, recovery, and audit state |
 | Memory | Existing bounded operational memory and retrieval components; durable records remain backend-owned |
@@ -70,6 +83,16 @@ HARIS defines five bounded operational roles:
 | **Warden** | Owns deterministic network-safety policy and privileged-dispatch trust decisions. |
 
 LangGraph supervises state and deterministic workflow transitions. CrewAI provides bounded, role-scoped advisory reasoning; its output cannot invent assets or measurements, bypass WARDEN, or directly execute Nokia actions.
+
+## Local AI advisor (no internet required)
+
+A local [Ollama](https://ollama.com) model can optionally provide advisory ranking without an Internet AI service. It is disabled by default and requires both `HARIS_LOCAL_LLM_ENABLED=true` and a loopback-only `LOCAL_LLM_BASE_URL`; the Windows launcher enables it only after detecting the configured model. The default model name is `qwen2.5:1.5b`.
+
+- When explicitly enabled, it is the only AI advisor the isolated fixture demo may consult; by default that demo makes no AI or HTTP request.
+- Loopback URLs only, so enabling it opens no outbound path.
+- It is bounded exactly like the hosted models: it may only rank the candidate IDs TRIAGE supplies, it moves confidence by at most +/-0.05, and any invalid output falls back to deterministic policy. WARDEN still decides.
+
+Demo behavior: when the optional advisor is enabled and returns a valid bounded ranking, the decision trace identifies the local model. Latency depends on operator hardware and model state; no performance benchmark is claimed.
 
 ## Closed-loop operations and playbooks
 
@@ -243,8 +266,8 @@ The real validation exercises database-level correctness through unique and idem
 Latest complete offline-safe result:
 
 ```text
-OFFLINE_TEST_TOTAL=625
-PASSED=625
+OFFLINE_TEST_TOTAL=690
+PASSED=690
 FAILED=0
 ERRORS=0
 OFFLINE_SAFE
@@ -285,6 +308,14 @@ Run it with:
 No credentials, private endpoints, or environment data are embedded in these references.
 
 ## Local setup
+
+### One click (Windows)
+
+Double-click **`START-HARIS.bat`**. The first run creates `.venv`, installs the requirements and copies `.env.example` to `.env` (fixture mode, no credentials). The console then opens at <http://localhost:8501>; `STOP-HARIS.bat` stops it. If Ollama is running with `qwen2.5:1.5b` pulled, the launcher explicitly opts into the loopback-only local advisor and pre-loads the model (set `HARIS_LOCAL_MODEL` to use another one).
+
+Console screenshots for the README and the deck: `python scripts/capture_screens.py` (Playwright with the local Chrome).
+
+### Manual
 
 ```powershell
 python -m venv .venv

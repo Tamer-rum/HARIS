@@ -6,8 +6,11 @@ import re
 import time
 import uuid
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, TypedDict
+from urllib.parse import urlparse
 
+import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from langgraph.graph import END, START, StateGraph
 
@@ -156,8 +159,39 @@ def _safe_json(text: str) -> Dict[str, Any]:
     return {}
 
 
+_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+class LocalChatModel:
+    """Advisory model served on this machine through Ollama's chat API.
+
+    Loopback only, so enabling it never opens a new outbound path: the prompt
+    stays on the host. It exposes the same ``ainvoke`` shape as the LangChain
+    chat models the router already uses.
+    """
+
+    def __init__(self, base_url: str, model: str, timeout_seconds: float):
+        parsed = urlparse(base_url)
+        if parsed.scheme not in {"http", "https"} or (parsed.hostname or "").lower() not in _LOOPBACK_HOSTS:
+            raise ValueError("local model URL must point at a loopback host")
+        self.base_url = base_url.rstrip("/")
+        self.model = model
+        self.timeout_seconds = timeout_seconds
+
+    async def ainvoke(self, prompt: str) -> SimpleNamespace:
+        async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+            response = await client.post(f"{self.base_url}/api/chat", json={
+                "model": self.model, "stream": False, "format": "json", "keep_alive": "30m",
+                "options": {"temperature": 0, "num_predict": 300},
+                "messages": [{"role": "user", "content": prompt}],
+            })
+            response.raise_for_status()
+            return SimpleNamespace(content=response.json()["message"]["content"])
+
+
 class ReasoningRouter:
-    """Uses the allowed Gemini/Groq models for advisory reasoning only.
+    """Uses the allowed Gemini/Groq models, then an optional local model, for
+    advisory reasoning only.
 
     The deterministic policy engine remains authoritative for every network action.
     """
@@ -165,12 +199,21 @@ class ReasoningRouter:
         self.settings = settings
         self.gemini = None
         self.groq = None
+        self.local = None
         self.availability_reason = "missing_model_credentials"
         if not external_access_policy().allow_llm:
             self.availability_reason = "runtime_policy_blocks_llm"
             return
+        if settings.has_local_llm:
+            try:
+                self.local = LocalChatModel(
+                    settings.local_llm_base_url, settings.local_llm_model,
+                    settings.local_llm_timeout_seconds,
+                )
+            except ValueError:
+                self.availability_reason = "local_model_url_not_loopback"
         if not LANGCHAIN_LLM_AVAILABLE:
-            self.availability_reason = "langchain_provider_dependency_unavailable"
+            self.availability_reason = "ready" if self.local else "langchain_provider_dependency_unavailable"
             return
         try:
             if settings.gemini_api_key:
@@ -196,6 +239,8 @@ class ReasoningRouter:
         else:
             if self.gemini or self.groq:
                 self.availability_reason = "ready"
+        if self.local:
+            self.availability_reason = "ready"
 
     def _deterministic_result(self, *, rationale: str, fallback_used: bool = True) -> Dict[str, Any]:
         return {
@@ -240,6 +285,8 @@ class ReasoningRouter:
         devices: List[DeviceStatus],
         actions: List[Action],
         candidate_ids: Optional[List[str]] = None,
+        *,
+        local_only: bool = False,
     ) -> Dict[str, Any]:
         candidate_ids = candidate_ids or _candidate_ids(actions)
         payload = {
@@ -257,19 +304,22 @@ class ReasoningRouter:
             ),
         }
         prompt = json.dumps(payload, default=str)
+        hosted_timeout = self.settings.ai_provider_timeout_seconds
         providers = [
-            ("gemini", self.settings.gemini_model, self.gemini),
-            ("groq", self.settings.groq_model, self.groq),
+            ("gemini", self.settings.gemini_model, self.gemini, hosted_timeout),
+            ("groq", self.settings.groq_model, self.groq, hosted_timeout),
+            ("local", f"{self.settings.local_llm_model} (local)", self.local,
+             self.settings.local_llm_timeout_seconds),
         ]
+        if local_only:
+            providers = [p for p in providers if p[0] == "local"]
         attempted_primary = False
-        for provider_name, model_name, model in providers:
+        for provider_name, model_name, model, timeout in providers:
             if model is None:
                 continue
             attempted_primary = attempted_primary or provider_name == "gemini"
             try:
-                response = await asyncio.wait_for(
-                    model.ainvoke(prompt), timeout=self.settings.ai_provider_timeout_seconds
-                )
+                response = await asyncio.wait_for(model.ainvoke(prompt), timeout=timeout)
                 text = response.content if hasattr(response, "content") else str(response)
                 result = self._validated_planner_result(text, candidate_ids)
                 result.update({
@@ -285,7 +335,8 @@ class ReasoningRouter:
                 # Provider errors can contain request details; do not log them verbatim.
                 logger.warning("%s planner advisory failed; trying safe fallback", provider_name)
         return self._deterministic_result(
-            rationale="Hosted model advisory unavailable or invalid; deterministic quality policy used."
+            rationale=("Local" if local_only else "Hosted")
+            + " model advisory unavailable or invalid; deterministic quality policy used."
         )
 
 
@@ -1800,16 +1851,19 @@ class HarisAgentSystem:
         # ---------------------------------------------------------
         # 4. Ask the reasoning layer to assess the proposed plan.
         # ---------------------------------------------------------
-        if state.get("isolated_fixture_demo"):
+        if state.get("isolated_fixture_demo") and self.reasoning.local is None:
             advisory = self.reasoning._deterministic_result(
                 rationale="External AI is disabled for the isolated fixture demonstration."
             )
         else:
+            # The isolated demo still blocks every external provider; a model
+            # on this machine is the one advisory source it may consult.
             advisory = await self.reasoning.assess(
                 incident,
                 devices,
                 actions,
                 [candidate_id_by_action[id(action)] for action in actions],
+                local_only=bool(state.get("isolated_fixture_demo")),
             )
         self._trace(
             state,

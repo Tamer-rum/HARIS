@@ -528,26 +528,6 @@ class LiveNokiaClient(BaseNokiaClient):
     """
     name = "live"
 
-    @staticmethod
-    def _provider_field(value: Any, *names: str) -> Any:
-        """Read an SDK model/dict field without inventing a missing value."""
-        if value is None:
-            return None
-        for name in names:
-            if isinstance(value, dict) and name in value:
-                return value[name]
-            candidate = getattr(value, name, None)
-            if candidate is not None:
-                return candidate
-        dump = getattr(value, "model_dump", None)
-        if callable(dump):
-            mapped = dump()
-            if isinstance(mapped, dict):
-                for name in names:
-                    if name in mapped:
-                        return mapped[name]
-        return None
-
     def __init__(self, settings: AppSettings):
         super().__init__(settings)
         if not settings.nac_api_token:
@@ -767,14 +747,12 @@ class LiveNokiaClient(BaseNokiaClient):
             # Use the newest interval.
             latest = max(
                 data,
-                key=lambda item: self._provider_field(
-                    item, "timeIntervalStart", "time_interval_start"
-                ) or "",
+                key=lambda item: item.get("timeIntervalStart", ""),
             )
 
-            level = str(self._provider_field(
-                latest, "congestionLevel", "congestion_level"
-            ) or "").strip()
+            level = str(
+                latest.get("congestionLevel", "")
+            ).strip()
 
 
 
@@ -785,9 +763,7 @@ class LiveNokiaClient(BaseNokiaClient):
                     f"Unknown Nokia congestion level: {level!r}"
                 )
 
-            confidence = self._provider_field(
-                latest, "confidenceLevel", "confidence_level"
-            )
+            confidence = latest.get("confidenceLevel")
 
             if confidence is None:
                 raise RuntimeError(
@@ -795,22 +771,13 @@ class LiveNokiaClient(BaseNokiaClient):
                     f"for cell={cell_id}"
                 )
             
-            interval_start = self._provider_field(
-                latest, "timeIntervalStart", "time_interval_start"
-            )
-            interval_stop = self._provider_field(
-                latest, "timeIntervalStop", "time_interval_stop"
-            )
-            if interval_start is None or interval_stop is None:
-                raise RuntimeError("Nokia congestion response is missing its observation interval")
-
             results.append(
                 CongestionReading(
                     cell_id=cell_id,
                     congestion_level=level,
                     confidence_level=int(confidence),
-                    interval_start=str(interval_start),
-                    interval_stop=str(interval_stop),
+                    interval_start=latest["timeIntervalStart"],
+                    interval_stop=latest["timeIntervalStop"],
                 )
             )
 
@@ -896,13 +863,10 @@ class LiveNokiaClient(BaseNokiaClient):
                 )
                 continue
 
-            reachable = self._provider_field(
-                data, "reachable", "connectivityStatus", "connectivity_status"
-            )
-            if isinstance(reachable, str):
-                normalized = reachable.strip().upper()
-                reachable = True if normalized.startswith("CONNECTED") else False if normalized.startswith("DISCONNECTED") else None
-            if not isinstance(reachable, bool):
+            if (
+                not isinstance(data, dict)
+                or not isinstance(data.get("reachable"), bool)
+            ):
                 logger.warning(
                     "Nokia device status response invalid for configured logical device=%s",
                     device_id,
@@ -912,7 +876,7 @@ class LiveNokiaClient(BaseNokiaClient):
             results.append(
                 DeviceStatus(
                     device_id=device_id,
-                    reachable=reachable,
+                    reachable=data["reachable"],
                     roaming=bool(haris_device.get("roaming", False)),
                     battery_pct=float(haris_device["battery_pct"]),
                     tier=int(haris_device["tier"]),
@@ -948,12 +912,10 @@ class LiveNokiaClient(BaseNokiaClient):
                 device,
             )
 
-            area = self._provider_field(data, "area")
-            center = self._provider_field(area, "center")
+            area = data.get("area", {})
+            center = area.get("center", {})
 
-            latitude = self._provider_field(center, "latitude")
-            longitude = self._provider_field(center, "longitude")
-            if latitude is None or longitude is None:
+            if not center:
                 raise RuntimeError(
                     f"Nokia returned no location center for HARIS device: {device_id}"
                 )
@@ -961,9 +923,9 @@ class LiveNokiaClient(BaseNokiaClient):
             results.append(
                 Location(
                     device_id=device_id,
-                    latitude=float(latitude),
-                    longitude=float(longitude),
-                    accuracy_m=float(self._provider_field(area, "radius") or 50.0),
+                    latitude=float(center["latitude"]),
+                    longitude=float(center["longitude"]),
+                    accuracy_m=float(area.get("radius", 50.0)),
                 )
             )
 

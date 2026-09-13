@@ -1630,6 +1630,147 @@ def render_network_section(
 
 
 # ============================================================================
+# Storm map
+# ============================================================================
+
+# Demo geography for the HARIS logical cells, around Amman. Configuration, not
+# telemetry: tower colours always come from the cycle's congestion evidence.
+CELL_SITES: Dict[str, Tuple[float, float]] = {
+    "T01": (32.035, 35.845), "T02": (31.950, 35.935), "T03": (31.972, 35.892),
+    "T04": (31.995, 36.020), "T05": (31.838, 36.018), "T06": (32.065, 36.090),
+    "T07": (31.880, 36.110),
+}
+# Used when NAC_GEOFENCE_AREAS does not configure a "storm-impact" area.
+DEMO_STORM_AREA = {"latitude": 31.905, "longitude": 35.955, "radius_m": 11000.0}
+LEVEL_RGB = {"High": [255, 77, 95], "Medium": [255, 200, 87], "Low": [66, 245, 155], "None": [66, 245, 155]}
+UNKNOWN_RGB = [120, 144, 170]
+
+
+def storm_area() -> Dict[str, float]:
+    configured = settings.nac_geofence_areas.get("storm-impact")
+    return configured.model_dump() if configured else dict(DEMO_STORM_AREA)
+
+
+def _coordinate(value: Any) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def storm_map_data(
+    levels: Dict[str, Optional[str]],
+    devices: List[Dict[str, Any]],
+    locations: List[Dict[str, Any]],
+    protected: set,
+    area: Dict[str, float],
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Plain layer rows for the storm map, kept pydeck-free so they are testable."""
+    towers = []
+    for cell, (lat, lon) in CELL_SITES.items():
+        level = levels.get(cell) if levels.get(cell) in LEVEL_RGB else None
+        rgb = LEVEL_RGB.get(level, UNKNOWN_RGB)
+        towers.append({
+            "cell": cell, "lat": lat, "lon": lon, "level": level or "N/A",
+            "colour": rgb + [255], "halo": rgb + [55],
+            "label": f"{cell} {str(level or 'N/A').upper()}",
+            "tip": f"Tower {cell} - Nokia congestion: {level or 'N/A'}",
+        })
+    where = {
+        str(item.get("device_id")): (_coordinate(item.get("latitude")), _coordinate(item.get("longitude")))
+        for item in locations if isinstance(item, dict)
+    }
+    points = []
+    for device in devices:
+        if not isinstance(device, dict):
+            continue
+        device_id = str(device.get("device_id"))
+        lat, lon = where.get(device_id, (None, None))
+        if lat is None or lon is None:
+            continue  # no location evidence, so no dot
+        tier = device.get("tier")
+        points.append({
+            "device": device_id, "lat": lat, "lon": lon, "tier": tier,
+            "colour": [49, 215, 255, 255] if tier == 1 else [190, 198, 210, 220],
+            "protected": device_id in protected,
+            "tip": f"{device_id} - tier {tier} - {device.get('cell_id')}"
+                   + (" - PROTECTED by HARIS" if device_id in protected else ""),
+        })
+    zone = [{
+        "lat": area["latitude"], "lon": area["longitude"], "radius": area["radius_m"],
+        "tip": f"Storm-impact zone - {area['radius_m'] / 1000:.0f} km (SIMULATED)",
+    }]
+    return {"towers": towers, "devices": points, "rings": [p for p in points if p["protected"]], "zone": zone}
+
+
+def storm_map_deck(rows: Dict[str, List[Dict[str, Any]]]):
+    import pydeck as pdk
+
+    position = "[lon, lat]"
+    layers = [
+        pdk.Layer("ScatterplotLayer", data=rows["zone"], get_position=position, get_radius="radius",
+                  filled=True, get_fill_color=[255, 140, 0, 30], stroked=True,
+                  get_line_color=[255, 170, 70, 220], line_width_min_pixels=2, pickable=True),
+        pdk.Layer("ScatterplotLayer", data=rows["towers"], get_position=position, get_radius=2600,
+                  get_fill_color="halo"),
+        pdk.Layer("ScatterplotLayer", data=rows["towers"], get_position=position, get_radius=420,
+                  get_fill_color="colour", stroked=True, get_line_color=[255, 255, 255, 210],
+                  line_width_min_pixels=1, pickable=True),
+        pdk.Layer("ScatterplotLayer", data=rows["rings"], get_position=position, get_radius=650,
+                  filled=False, stroked=True, get_line_color=[66, 245, 155, 255], line_width_min_pixels=2),
+        pdk.Layer("ScatterplotLayer", data=rows["devices"], get_position=position, get_radius=230,
+                  get_fill_color="colour", pickable=True),
+        pdk.Layer("TextLayer", data=rows["towers"], get_position=position, get_text="label",
+                  get_size=13, get_color=[235, 242, 250], get_pixel_offset=[0, -20]),
+    ]
+    return pdk.Deck(
+        map_provider="carto", map_style="dark",
+        initial_view_state=pdk.ViewState(latitude=31.94, longitude=35.98, zoom=9.4),
+        layers=layers, tooltip={"text": "{tip}"},
+    )
+
+
+def render_storm_map(result: Optional[Dict[str, Any]], key: str) -> None:
+    """Towers coloured by the cycle's congestion, the storm zone and critical devices."""
+    data = safe_mapping(result)
+    after = {cell: values.get("congestion_level") for cell, values in congestion_map(result).items()}
+    before = {cell: values.get("congestion_level") for cell, values in baseline_map(result).items()}
+    if not after and not before:
+        return
+    st.markdown(
+        '<div class="section-title"><span class="section-mark">●</span><span>STORM MAP · TOWERS &amp; IMPACT ZONE</span></div>',
+        unsafe_allow_html=True,
+    )
+    devices = [item for item in data.get("devices") or [] if isinstance(item, dict)]
+    locations = [item for item in data.get("locations") or [] if isinstance(item, dict)]
+    executed = bool(safe_mapping(data.get("execution")).get("executed"))
+    protected = set(safe_mapping(data.get("plan")).get("selected_device_ids") or []) if executed else set()
+    area = storm_area()
+    try:
+        if before and after and before != after:
+            left, right = st.columns(2)
+            with left:
+                st.caption("BEFORE HARIS · baseline congestion")
+                st.pydeck_chart(storm_map_deck(storm_map_data(before, devices, locations, set(), area)),
+                                width="stretch", height=380, key=f"storm-map-{key}-before")
+            with right:
+                st.caption("AFTER HARIS · post-action readback · green ring = protected")
+                st.pydeck_chart(storm_map_deck(storm_map_data(after, devices, locations, protected, area)),
+                                width="stretch", height=380, key=f"storm-map-{key}-after")
+        else:
+            st.pydeck_chart(storm_map_deck(storm_map_data(after or before, devices, locations, protected, area)),
+                            width="stretch", height=420, key=f"storm-map-{key}")
+    except Exception:
+        logger.warning("Storm map unavailable; details suppressed")
+        st.caption("Storm map unavailable.")
+        return
+    st.caption(
+        "Site positions and the storm-impact circle are HARIS-configured demo geography (SIMULATED). "
+        "Tower colours are the cycle's categorical congestion evidence; device dots use CARTOGRAPHER location evidence."
+    )
+
+
+# ============================================================================
 # KPI impact
 # ============================================================================
 
@@ -2474,6 +2615,8 @@ def render_network_intelligence(result: Optional[Dict[str, Any]]) -> None:
     render_prediction(result)
     cached_network = st.session_state.get("network_intelligence_entities")
     render_network_section(result, cached_network if isinstance(cached_network, dict) else None)
+    # Locally the demo cycle lives in session state rather than in `result`.
+    render_storm_map(result or st.session_state.get("fixture_demo_cycle"), key="intel")
     geofence_events = [event for event in (safe_mapping(result).get("events") or []) if "GEOFENCE" in safe_upper(safe_mapping(event).get("message"), "")]
     st.markdown('### GEOFENCE EVENTS')
     if geofence_events: st.dataframe(geofence_events, width="stretch", hide_index=True)
@@ -2659,13 +2802,19 @@ def render_console() -> None:
         render_controls()
         fixture_demo = st.session_state.get("fixture_demo_cycle")
         if fixture_demo:
+            local_ai_state = (
+                f"ENABLED ({html.escape(settings.local_llm_model)}, loopback only)"
+                if settings.has_local_llm else "DISABLED"
+            )
             render_html(
-                """
+                f"""
                 <div class="notification-panel">
                   <b>SIMULATED / FIXTURE HARIS DEMONSTRATION</b><br>
                   Authority: PROCESS-LOCAL FIXTURE DEMO<br>
                   Provider access: DISABLED<br>
-                  External AI/HTTP access: DISABLED<br>
+                  External provider / Internet AI access: DISABLED<br>
+                  Local Ollama advisory: {local_ai_state}<br>
+                  Authority: ADVISORY ONLY<br>
                   Durable operational incident: NOT CREATED<br>
                   Durable history write: DISABLED
                 </div>
@@ -2686,6 +2835,7 @@ def render_console() -> None:
             )
         autonomous_result = fixture_demo_presentation_cycle(fixture_demo) if fixture_demo else result
         render_decision_engine(autonomous_result)
+        render_storm_map(autonomous_result, key="ops")
         render_impact(autonomous_result)
         render_playbook_and_feed(autonomous_result)
     elif section == "TRUSTED DISPATCH":

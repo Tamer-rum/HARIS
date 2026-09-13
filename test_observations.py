@@ -13,26 +13,22 @@ class ObservationClient(FixtureNokiaClient):
     def __init__(self, settings):
         super().__init__(settings)
         self.calls = {"congestion": 0, "devices": 0, "locations": 0}
-        self.arguments = {}
         self.fail = {}
         self.delay = 0
 
     async def congestion_insights(self, *args):
         self.calls["congestion"] += 1
-        self.arguments["congestion"] = args
         if self.delay: await asyncio.sleep(self.delay)
         if self.fail.get("congestion"): raise self.fail["congestion"]
         return await super().congestion_insights(*args)
 
     async def device_status(self, *args):
         self.calls["devices"] += 1
-        self.arguments["devices"] = args
         if self.fail.get("devices"): raise self.fail["devices"]
         return await super().device_status(*args)
 
     async def location_retrieval(self, *args):
         self.calls["locations"] += 1
-        self.arguments["locations"] = args
         if self.fail.get("locations"): raise self.fail["locations"]
         return await super().location_retrieval(*args)
 
@@ -120,22 +116,6 @@ class ObservationTests(unittest.TestCase):
         snapshot = asyncio.run(ObservationStore(ObservationClient(settings), settings).poll_once())
         self.assertEqual(snapshot["mode"], "fixture")
         self.assertEqual(snapshot["source"], "fixture")
-
-    def test_live_poller_uses_only_proven_canary_identity_scope(self):
-        settings = AppSettings(
-            nac_mode="live_read_only", nac_api_token="offline-test-token",
-            fixture_dir="fixtures", nokia_observation_enabled=True,
-            nokia_observation_cell_ids=["T03"],
-            nokia_observation_device_ids=["ambulance-01"],
-        )
-        client = ObservationClient(settings)
-        snapshot = asyncio.run(ObservationStore(client, settings).poll_once())
-        self.assertEqual(client.arguments["congestion"], (["T03"],))
-        self.assertEqual(client.arguments["devices"], (["ambulance-01"],))
-        self.assertEqual(client.arguments["locations"], (["ambulance-01"],))
-        self.assertEqual([row["cell_id"] for row in snapshot["congestion"]], ["T03"])
-        self.assertEqual([row["device_id"] for row in snapshot["devices"]], ["ambulance-01"])
-        self.assertEqual([row["device_id"] for row in snapshot["locations"]], ["ambulance-01"])
 
     def test_diagnostic_persists_only_aggregate_safe_evidence(self):
         settings = self.settings()

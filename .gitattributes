@@ -1,0 +1,2 @@
+# Windows launchers must keep CRLF or cmd.exe misreads them.
+*.bat text eol=crlf

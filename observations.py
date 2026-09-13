@@ -44,15 +44,8 @@ class ObservationStore:
         async with lock:
             now = time.time(); started = time.perf_counter(); state["last_attempt_at"] = now; method = getattr(self.client, CAPABILITIES[name][0])
             try:
-                if self.settings.nac_mode == "fixture":
-                    arguments = None if name == "congestion" else self.settings.registered_devices
-                else:
-                    arguments = self.settings.nokia_observation_cell_ids if name == "congestion" else self.settings.nokia_observation_device_ids
-                    if not arguments:
-                        raise RuntimeError("Live observation identity scope is unavailable")
-                values = await asyncio.wait_for(method() if arguments is None else method(arguments), timeout=self.settings.nokia_observation_timeout_seconds)
-                success_at = time.time()
-                state.update({"last_success_at": success_at, "next_due_at": success_at + self._interval(name), "status": "LIVE", "backoff_seconds": 0.0, "evidence": [x.model_dump() for x in values]})
+                values = await asyncio.wait_for(method() if name == "congestion" else method(self.settings.registered_devices), timeout=self.settings.nokia_observation_timeout_seconds)
+                state.update({"last_success_at": now, "next_due_at": now + self._interval(name), "status": "LIVE", "backoff_seconds": 0.0, "evidence": [x.model_dump() for x in values]})
                 if self._diagnostic:
                     # Persist only aggregate, non-identifying evidence.  This is a
                     # diagnostic audit trail, not a copy of Nokia responses.
@@ -62,7 +55,7 @@ class ObservationStore:
                         evidence_summary = {"reachable": sum(bool(item.reachable) for item in values), "unreachable": sum(not bool(item.reachable) for item in values)}
                     else:
                         evidence_summary = {"location_results": len(values)}
-                    self._diagnostic.append({"timestamp": success_at, "capability": name, "status": "success", "source": self.client.name, "mode": self.settings.nac_mode, "latency_ms": round((time.perf_counter() - started) * 1000, 1), "evidence_count": len(values), "evidence_summary": evidence_summary, "last_success_at": success_at, "next_due_at": state["next_due_at"], "rate_limited": False})
+                    self._diagnostic.append({"timestamp": now, "capability": name, "status": "success", "source": self.client.name, "mode": self.settings.nac_mode, "latency_ms": round((time.perf_counter() - started) * 1000, 1), "evidence_count": len(values), "evidence_summary": evidence_summary, "last_success_at": now, "next_due_at": state["next_due_at"], "rate_limited": False})
             except asyncio.TimeoutError:
                 state["status"] = "TIMEOUT"; state["backoff_seconds"] = min(max(state["backoff_seconds"] * 2, self._interval(name)), self.settings.nokia_observation_max_backoff_seconds); state["next_due_at"] = now + state["backoff_seconds"]
                 if self._diagnostic: self._diagnostic.append({"timestamp": now, "capability": name, "status": "timeout", "latency_ms": round((time.perf_counter() - started) * 1000, 1), "next_due_at": state["next_due_at"], "rate_limited": False, "error_class": "TimeoutError"})

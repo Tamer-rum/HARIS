@@ -97,20 +97,11 @@ class NetworkStateRegistry:
         for cell, reachability in by_cell.items():
             entity = self._entity(cell)
             entity.update({"source": source, "reachability": {"reachable": sum(reachability), "unreachable": len(reachability) - sum(reachability)}, "reachability_observed_at": observed_at})
-        device_cells = {
-            str(row.get("device_id")): str(row.get("cell_id"))
-            for row in observation.get("devices") or []
-            if row.get("device_id") and row.get("cell_id")
-        }
-        location_cells = {
-            device_cells[str(row.get("device_id"))]
-            for row in observation.get("locations") or []
-            if str(row.get("device_id")) in device_cells
-        }
-        for cell in location_cells:
-            entity = self._entity(cell)
-            entity["location_available"] = True
-            entity["location_observed_at"] = observed_at
+        location_cells = {str(row.get("device_id")) for row in observation.get("locations") or [] if row.get("device_id")}
+        if location_cells:
+            for entity in self._entities.values():
+                entity["location_available"] = True
+                entity["location_observed_at"] = observed_at
         self._refresh(observed_at)
         return self.snapshot()["entities"]
 
