@@ -5,9 +5,11 @@ import html
 import json
 import logging
 import math
+import os
 import secrets
 import time
 import textwrap
+from collections.abc import Mapping, MutableMapping
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import re
@@ -31,6 +33,42 @@ from nokia_clients import build_nokia_client
 # No backend logic is reimplemented here.
 # ============================================================================
 
+
+_STREAMLIT_BACKEND_SETTING_NAMES = (
+    "HARIS_BACKEND_URL",
+    "HARIS_BACKEND_API_TOKEN",
+)
+
+
+def bootstrap_streamlit_backend_settings(
+    secret_source: Optional[Mapping[str, Any]] = None,
+    environ: Optional[MutableMapping[str, str]] = None,
+) -> None:
+    """Expose only Streamlit's backend client settings before AppSettings caches.
+
+    Existing non-empty process settings win. Missing Streamlit secrets are normal
+    for local fixture runs, and no secret value is logged or returned.
+    """
+    target = os.environ if environ is None else environ
+    if secret_source is None:
+        if get_script_run_ctx(suppress_warning=True) is None:
+            return
+        try:
+            secret_source = st.secrets
+        except Exception:
+            return
+    for name in _STREAMLIT_BACKEND_SETTING_NAMES:
+        if str(target.get(name) or "").strip():
+            continue
+        try:
+            value = secret_source.get(name)
+        except Exception:
+            continue
+        if isinstance(value, str) and value.strip():
+            target[name] = value.strip()
+
+
+bootstrap_streamlit_backend_settings()
 settings = get_settings()
 
 logging.basicConfig(
